@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>GetACSEvent</RootNamespace>
+    <AssemblyName>ACSEventConsole</AssemblyName>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <LangVersion>latest</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="GetACSEvent.cs" />
+    <Compile Remove="GetACSEvent.designer.cs" />
+    <Compile Remove="Program.cs" />
+    <Compile Remove="Public\**" />
+    <Compile Remove="Language\**" />
+    <Compile Remove="Properties\Resources.Designer.cs" />
+    <Compile Remove="Properties\Settings.Designer.cs" />
+    <EmbeddedResource Remove="**/*.resx" />
+    <None Remove="GetACSEvent.csproj" />
+  </ItemGroup>
+
+  <Target Name="CopyHikvisionRuntime" AfterTargets="Build">
+    <Exec Command="xcopy /Y /E /I &quot;$(ProjectDir)Runtime\x64\*.*&quot; &quot;$(OutDir)&quot;" />
+  </Target>
+</Project>
