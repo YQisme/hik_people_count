@@ -64,3 +64,11 @@ backend/config/EmployeeConfig.json
 # Test & coverage
 coverage/
 TestResults/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
