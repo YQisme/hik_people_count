@@ -208,10 +208,10 @@ namespace GetACSEvent
                         }
                     }
 
-                    // 查找对应的服务实例
-                    foreach (ACSEventService service in m_ServiceList)
+                    // 查找对应的服务实例并按设备 IP 分发
+                    ACSEventService service;
+                    if (m_ServiceByIp.TryGetValue(deviceIP, out service))
                     {
-                        // 调用对应服务的处理函数
                         service.ProcessCommAlarmAcs(pAlarmInfo, dwBufLen, ref pAlarmer);
                     }
                 }
@@ -237,6 +237,8 @@ namespace GetACSEvent
             {
                 return;
             }
+
+            AcsEventProcessingQueue.Start();
 
             m_ServiceList.Clear();
             m_ServiceByIp.Clear();
@@ -319,6 +321,8 @@ namespace GetACSEvent
             {
                 service.Stop();
             }
+
+            AcsEventProcessingQueue.Stop();
 
             m_ServiceList.Clear();
             m_ServiceByIp.Clear();

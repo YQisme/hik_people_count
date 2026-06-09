@@ -109,8 +109,11 @@ namespace GetACSEvent
                         return;
                     }
 
-                    Handle(ctx);
-                    WriteResponse(stream, ctx.Response);
+                    Handle(ctx, stream);
+                    if (!ctx.Response.Headers.ContainsKey("X-Stream-Handled"))
+                    {
+                        WriteResponse(stream, ctx.Response);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -328,7 +331,7 @@ namespace GetACSEvent
             }
         }
 
-        private void Handle(SimpleHttpContext ctx)
+        private void Handle(SimpleHttpContext ctx, NetworkStream stream)
         {
             ApplyCommonHeaders(ctx.Response);
 
@@ -339,6 +342,11 @@ namespace GetACSEvent
             }
 
             string path = ctx.Request.Url.AbsolutePath.ToLowerInvariant();
+            if (path == "/api/dashboard/stream" && ctx.Request.HttpMethod == "GET")
+            {
+                HandleDashboardStream(ctx, stream);
+                return;
+            }
             if (path == "/api/dashboard" || path == "/dashboard-data")
             {
                 var payload = new DashboardDataBuilder(_store.Snapshot()).Build();
@@ -594,6 +602,7 @@ namespace GetACSEvent
             sb.Append("<p>当前服务已同时支持门禁事件查看、配置编辑，以及供前端看板使用的数据接口。</p>");
             sb.Append("<ul>");
             sb.Append("<li><a href=\"/api/dashboard\">/api/dashboard</a> - newdemo 看板聚合接口</li>");
+            sb.Append("<li><a href=\"/api/dashboard/stream\">/api/dashboard/stream</a> - 看板 SSE 实时推送</li>");
             sb.Append("<li><a href=\"/api/limit-count\">/api/limit-count</a> - 限制人数读取/更新接口</li>");
             sb.Append("<li><a href=\"/api/employee\">/api/employee</a> - 本地人员表 JSON 接口</li>");
             sb.Append("<li><a href=\"/api/employee/search?q=yq\">/api/employee/search?q=关键字</a> - 人员检索接口</li>");
@@ -649,6 +658,60 @@ namespace GetACSEvent
             if (string.IsNullOrEmpty(value)) return string.Empty;
             value = value.Replace('+', ' ');
             try { return Uri.UnescapeDataString(value); } catch { return value; }
+        }
+
+        private void HandleDashboardStream(SimpleHttpContext ctx, NetworkStream stream)
+        {
+            ctx.Response.Headers["X-Stream-Handled"] = "1";
+
+            var headerBuilder = new StringBuilder();
+            headerBuilder.Append("HTTP/1.1 200 OK\r\n");
+            headerBuilder.Append("Content-Type: text/event-stream; charset=utf-8\r\n");
+            headerBuilder.Append("Cache-Control: no-cache\r\n");
+            headerBuilder.Append("Connection: keep-alive\r\n");
+            headerBuilder.Append("Access-Control-Allow-Origin: *\r\n");
+            headerBuilder.Append("Access-Control-Allow-Methods: GET, OPTIONS\r\n");
+            headerBuilder.Append("Access-Control-Allow-Headers: Accept\r\n");
+            headerBuilder.Append("\r\n");
+
+            byte[] headerBytes = Encoding.UTF8.GetBytes(headerBuilder.ToString());
+            stream.Write(headerBytes, 0, headerBytes.Length);
+            stream.Flush();
+
+            long lastRevision = -1;
+            DateTime lastHeartbeatUtc = DateTime.UtcNow;
+
+            while (_running)
+            {
+                try
+                {
+                    long revision = _store.Revision;
+                    if (revision != lastRevision)
+                    {
+                        DashboardPayload payload = new DashboardDataBuilder(_store.Snapshot()).Build();
+                        string json = SerializeDashboard(payload);
+                        string sse = "event: dashboard\ndata: " + json + "\n\n";
+                        byte[] bytes = Encoding.UTF8.GetBytes(sse);
+                        stream.Write(bytes, 0, bytes.Length);
+                        stream.Flush();
+                        lastRevision = revision;
+                        lastHeartbeatUtc = DateTime.UtcNow;
+                    }
+                    else if ((DateTime.UtcNow - lastHeartbeatUtc).TotalSeconds >= 15)
+                    {
+                        byte[] ping = Encoding.UTF8.GetBytes(": heartbeat\n\n");
+                        stream.Write(ping, 0, ping.Length);
+                        stream.Flush();
+                        lastHeartbeatUtc = DateTime.UtcNow;
+                    }
+
+                    Thread.Sleep(250);
+                }
+                catch
+                {
+                    break;
+                }
+            }
         }
 
         private static string SerializeDashboard(DashboardPayload payload)

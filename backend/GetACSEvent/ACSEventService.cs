@@ -235,274 +235,150 @@ namespace GetACSEvent
         }
 
         /// <summary>
-        /// 处理门禁主机报警信息
+        /// 处理门禁主机报警信息（SDK 回调线程：仅拷贝数据并入队）
         /// </summary>
         public void ProcessCommAlarmAcs(IntPtr pAlarmInfo, uint dwBufLen, ref CHCNetSDK.NET_DVR_ALARMER pAlarmer)
         {
-            CHCNetSDK.NET_DVR_ACS_ALARM_INFO struAcsAlarmInfo = new CHCNetSDK.NET_DVR_ACS_ALARM_INFO();
-            struAcsAlarmInfo = (CHCNetSDK.NET_DVR_ACS_ALARM_INFO)Marshal.PtrToStructure(pAlarmInfo, typeof(CHCNetSDK.NET_DVR_ACS_ALARM_INFO));
-
-            // 获取设备IP地址
-            string deviceIP = m_DeviceIP;
-            // 如果报警器中有设备信息，则使用报警器中的设备IP
+            string alarmDeviceIP = m_DeviceIP;
             if (pAlarmer.sDeviceIP != null && pAlarmer.sDeviceIP.Length > 0)
             {
-                string alarmDeviceIP = Encoding.UTF8.GetString(pAlarmer.sDeviceIP).TrimEnd('\0');
-                if (!string.IsNullOrEmpty(alarmDeviceIP))
+                string fromAlarmer = Encoding.UTF8.GetString(pAlarmer.sDeviceIP).TrimEnd('\0');
+                if (!string.IsNullOrEmpty(fromAlarmer))
                 {
-                    deviceIP = alarmDeviceIP;
+                    alarmDeviceIP = fromAlarmer;
                 }
             }
 
-            // 验证事件是否来自当前设备
-            if (deviceIP != m_DeviceIP)
+            if (!string.Equals(alarmDeviceIP, m_DeviceIP, StringComparison.OrdinalIgnoreCase))
             {
-                // 如果事件不是来自当前设备，则忽略
                 return;
             }
 
-            // 事件类型
-            string majorType = GetMajorTypeString(struAcsAlarmInfo.dwMajor);
-            string minorType = GetMinorTypeString(struAcsAlarmInfo.dwMajor, struAcsAlarmInfo.dwMinor);
+            AcsEventProcessingQueue.TryEnqueueFromCallback(this, m_DeviceIP, pAlarmInfo, ref pAlarmer);
+        }
 
-            // 时间
-            string time = string.Format("{0:D4}-{1:D2}-{2:D2} {3:D2}:{4:D2}:{5:D2}", 
-                struAcsAlarmInfo.struTime.dwYear, 
-                struAcsAlarmInfo.struTime.dwMonth, 
-                struAcsAlarmInfo.struTime.dwDay, 
-                struAcsAlarmInfo.struTime.dwHour, 
-                struAcsAlarmInfo.struTime.dwMinute, 
-                struAcsAlarmInfo.struTime.dwSecond);
+        /// <summary>
+        /// 后台线程处理门禁刷脸事件
+        /// </summary>
+        internal void ProcessPendingAlarm(PendingAcsAlarm pending)
+        {
+            if (pending == null)
+            {
+                return;
+            }
 
-            // 卡号
-            string cardNo = Encoding.UTF8.GetString(struAcsAlarmInfo.struAcsEventInfo.byCardNo).TrimEnd('\0');
-            
-            // 员工号和姓名 - 从扩展结构体中获取
-            string employeeNo = "未知";
-            string personName = "未知";
-            
-            // 从扩展结构体中获取员工号
-            if (struAcsAlarmInfo.byAcsEventInfoExtend == 1 && struAcsAlarmInfo.pAcsEventInfoExtend != IntPtr.Zero)
+            if (!string.Equals(pending.DeviceIP, m_DeviceIP, StringComparison.OrdinalIgnoreCase))
             {
-                CHCNetSDK.NET_DVR_ACS_EVENT_INFO_EXTEND struAcsEventInfoExtend = 
-                    (CHCNetSDK.NET_DVR_ACS_EVENT_INFO_EXTEND)Marshal.PtrToStructure(
-                        struAcsAlarmInfo.pAcsEventInfoExtend, 
-                        typeof(CHCNetSDK.NET_DVR_ACS_EVENT_INFO_EXTEND));
-                
-                employeeNo = Encoding.UTF8.GetString(struAcsEventInfoExtend.byEmployeeNo).TrimEnd('\0');
-                if (string.IsNullOrEmpty(employeeNo))
-                {
-                    employeeNo = struAcsAlarmInfo.struAcsEventInfo.dwEmployeeNo.ToString();
-                }
+                return;
             }
-            else
+
+            string deviceIP = pending.DeviceIP;
+            string majorType = GetMajorTypeString(pending.DwMajor);
+            string minorType = GetMinorTypeString(pending.DwMajor, pending.DwMinor);
+            string time = string.Format("{0:D4}-{1:D2}-{2:D2} {3:D2}:{4:D2}:{5:D2}",
+                pending.EventTime.dwYear,
+                pending.EventTime.dwMonth,
+                pending.EventTime.dwDay,
+                pending.EventTime.dwHour,
+                pending.EventTime.dwMinute,
+                pending.EventTime.dwSecond);
+
+            string cardNo = pending.CardNo ?? string.Empty;
+            string employeeNo = pending.EmployeeNo ?? string.Empty;
+            string personName = ResolvePersonName(employeeNo, pending.SNetUser);
+            uint doorNo = pending.DoorNo;
+            string cardType = GetCardTypeString(pending.CardType);
+
+            AcsEvent faceEvent = new AcsEvent
             {
-                employeeNo = struAcsAlarmInfo.struAcsEventInfo.dwEmployeeNo.ToString();
-            }
-            
-            // 根据员工号从哈希表中查询姓名
-            if (!string.IsNullOrEmpty(employeeNo) && !string.Equals(employeeNo, "0"))
+                TimeUtc = DateTime.UtcNow,
+                Time = time,
+                DeviceIP = deviceIP,
+                DeviceName = GetDeviceName(deviceIP),
+                DeviceID = GetDeviceID(deviceIP),
+                AreaID = GetAreaID(deviceIP),
+                Remark = GetRemark(deviceIP),
+                MajorType = majorType,
+                MinorType = minorType,
+                CardNo = cardNo,
+                EmployeeNo = employeeNo,
+                PersonName = personName,
+                CardType = cardType,
+                DoorNo = doorNo,
+                Direction = GetDoorDirection(deviceIP, doorNo),
+                ImageUrl = string.Empty
+            };
+
+            ACSEventMultiDeviceService.SharedEventStore.Add(faceEvent);
+
+            try
             {
-                // 添加调试信息
-                // Console.WriteLine($"[调试] 当前员工号: '{employeeNo}'");
-                // Console.WriteLine($"[调试] 哈希表总数: {ACSEventConsole.EmployeeNameMap.Count}");
-                
-                // 显示哈希表中的前几个键值对用于调试
-                // int debugCount = 0;
-                // foreach (var kvp in ACSEventConsole.EmployeeNameMap)
-                // {
-                //     if (debugCount < 5) // 只显示前5个
-                //     {
-                //         Console.WriteLine($"[调试] 哈希表项 {debugCount}: '{kvp.Key}' -> '{kvp.Value}'");
-                //         debugCount++;
-                //     }
-                //     else break;
-                // }
-                
-                if (ACSEventConsole.EmployeeNameMap.ContainsKey(employeeNo))
+                string direction = faceEvent.Direction;
+                if (string.Equals(direction, "出", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(direction, "出", StringComparison.CurrentCulture))
                 {
-                    personName = ACSEventConsole.EmployeeNameMap[employeeNo];
-                    // Console.WriteLine($"[调试] 找到员工姓名: '{personName}'");
-                }
-                else
-                {
-                    // Console.WriteLine($"[调试] 哈希表中未找到员工号: '{employeeNo}'");
-                    
-                    // 尝试不同的格式匹配
-                    string[] possibleKeys = {
-                        employeeNo,
-                        employeeNo.Trim(),
-                        employeeNo.TrimStart('0'), // 去掉前导零
-                        employeeNo.PadLeft(employeeNo.Length + 1, '0'), // 添加前导零
-                        employeeNo.ToUpper(),
-                        employeeNo.ToLower()
-                    };
-                    
-                    bool found = false;
-                    foreach (string key in possibleKeys)
+                    ACSEventMultiDeviceService sharedService = ACSEventMultiDeviceService.SharedInstance;
+                    if (sharedService != null)
                     {
-                        if (ACSEventConsole.EmployeeNameMap.ContainsKey(key))
-                        {
-                            personName = ACSEventConsole.EmployeeNameMap[key];
-                            // Console.WriteLine($"[调试] 通过格式匹配找到员工姓名: '{personName}' (使用键: '{key}')");
-                            found = true;
-                            break;
-                        }
-                    }
-                    
-                    if (!found)
-                    {
-                        // 如果哈希表中没有找到，尝试从sNetUser字段获取人名信息作为备用
-                        string sNetUserName = Encoding.UTF8.GetString(struAcsAlarmInfo.sNetUser).Trim('\0');
-                        if (!string.IsNullOrEmpty(sNetUserName))
-            {
-                            personName = sNetUserName;
-                            // Console.WriteLine($"[调试] 使用sNetUser字段: '{personName}'");
-                        }
-                        else
-                        {
-                            personName = "未知员工(" + employeeNo + ")";
-                            // Console.WriteLine($"[调试] 设置为未知员工");
-                        }
+                        sharedService.TryHandleExitPass(deviceIP, (int)doorNo);
                     }
                 }
             }
-            else
+            catch (Exception openEx)
             {
-                // 如果员工号为空或为0，尝试从sNetUser字段获取人名信息
-                string sNetUserName = Encoding.UTF8.GetString(struAcsAlarmInfo.sNetUser).Trim('\0');
-                if (!string.IsNullOrEmpty(sNetUserName))
-                {
-                    personName = sNetUserName;
-                }
-            }
-            
-            // 门编号
-            uint doorNo = struAcsAlarmInfo.struAcsEventInfo.dwDoorNo;
-            
-            // 卡类型
-            string cardType = GetCardTypeString(struAcsAlarmInfo.struAcsEventInfo.byCardType);
-            
-            bool isPersonFaceEvent = struAcsAlarmInfo.dwMinor == 75 && struAcsAlarmInfo.dwMajor == CHCNetSDK.MAJOR_EVENT;
-            AcsEvent mqttFaceEvent = null;
-
-            // 只输出未知事件类型(75)的事件信息
-            if (isPersonFaceEvent)
-            {
-                // 发布到事件存储
-                try
-                {
-                    mqttFaceEvent = new AcsEvent
-                    {
-                        TimeUtc = DateTime.UtcNow,
-                        Time = time,  // 保存原始时间字符串，与控制台输出保持一致
-                        DeviceIP = deviceIP,
-                        DeviceName = GetDeviceName(deviceIP),
-                        DeviceID = GetDeviceID(deviceIP),
-                        AreaID = GetAreaID(deviceIP),
-                        Remark = GetRemark(deviceIP),
-                        MajorType = majorType,
-                        MinorType = minorType,
-                        CardNo = cardNo,
-                        EmployeeNo = employeeNo,
-                        PersonName = personName,
-                        CardType = cardType,
-                        DoorNo = doorNo,
-                        Direction = GetDoorDirection(deviceIP, doorNo),
-                        ImageUrl = string.Empty
-                    };
-                    ACSEventMultiDeviceService.SharedEventStore.Add(mqttFaceEvent);
-                }
-                catch { }
-
-                try
-                {
-                    string direction = GetDoorDirection(deviceIP, doorNo);
-                    if (string.Equals(direction, "出", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(direction, "出", StringComparison.CurrentCulture))
-                    {
-                        ACSEventMultiDeviceService sharedService = ACSEventMultiDeviceService.SharedInstance;
-                        if (sharedService != null)
-                        {
-                            sharedService.TryHandleExitPass(deviceIP, (int)doorNo);
-                        }
-                    }
-                }
-                catch (Exception openEx)
-                {
-                    Console.WriteLine("设备IP：" + m_DeviceIP + "，出门联动开门失败：" + openEx.Message);
-                }
-
-                Console.WriteLine("--------------------------------------------------");
-                Console.WriteLine("设备IP: " + deviceIP);
-                Console.WriteLine("设备名称: " + GetDeviceName(deviceIP));
-                Console.WriteLine("设备ID: " + GetDeviceID(deviceIP));
-                Console.WriteLine("区域ID: " + GetAreaID(deviceIP));
-                Console.WriteLine("备注: " + GetRemark(deviceIP));
-                Console.WriteLine("时间: " + time);
-                Console.WriteLine("事件类型: " + majorType + " - " + minorType);
-                Console.WriteLine("卡号: " + cardNo);
-                Console.WriteLine("员工号: " + employeeNo);
-                Console.WriteLine("姓名: " + personName);
-                Console.WriteLine("卡类型: " + cardType);
-                Console.WriteLine("门编号: " + doorNo);
+                Console.WriteLine("设备IP：" + m_DeviceIP + "，出门联动开门失败：" + openEx.Message);
             }
 
-            // 只保存未知事件类型(75)的图片
-            if (isPersonFaceEvent && 
-                struAcsAlarmInfo.dwPicDataLen > 0 && struAcsAlarmInfo.pPicData != IntPtr.Zero)
+            Console.WriteLine("--------------------------------------------------");
+            Console.WriteLine("设备IP: " + deviceIP);
+            Console.WriteLine("设备名称: " + GetDeviceName(deviceIP));
+            Console.WriteLine("设备ID: " + GetDeviceID(deviceIP));
+            Console.WriteLine("区域ID: " + GetAreaID(deviceIP));
+            Console.WriteLine("备注: " + GetRemark(deviceIP));
+            Console.WriteLine("时间: " + time);
+            Console.WriteLine("事件类型: " + majorType + " - " + minorType);
+            Console.WriteLine("卡号: " + cardNo);
+            Console.WriteLine("员工号: " + employeeNo);
+            Console.WriteLine("姓名: " + personName);
+            Console.WriteLine("卡类型: " + cardType);
+            Console.WriteLine("门编号: " + doorNo);
+
+            if (pending.PicData != null && pending.PicData.Length > 0)
             {
-                // 获取设备名称
                 string deviceName = GetDeviceName(deviceIP);
                 if (string.IsNullOrEmpty(deviceName) || deviceName == "未知设备")
                 {
-                    deviceName = deviceIP; // 如果设备名称为空，使用IP作为设备名称
+                    deviceName = deviceIP;
                 }
 
-                // 处理姓名，移除特殊字符，确保文件夹名称合法
                 string safePersonName = GetSafeFolderName(personName);
                 if (string.IsNullOrEmpty(safePersonName) || safePersonName == "未知")
                 {
                     safePersonName = "未知员工";
                 }
 
-                // 创建目录结构：D:/Picture/设备名称/员工姓名/
                 string dirPath = "D:/Picture/" + deviceName + "/" + safePersonName + "/";
                 if (!Directory.Exists(dirPath))
                 {
                     Directory.CreateDirectory(dirPath);
                 }
 
-                // 生成文件名：姓名+时间
                 string timeStr = string.Format("{0:D4}{1:D2}{2:D2}_{3:D2}{4:D2}{5:D2}",
-                    struAcsAlarmInfo.struTime.dwYear, struAcsAlarmInfo.struTime.dwMonth, struAcsAlarmInfo.struTime.dwDay,
-                    struAcsAlarmInfo.struTime.dwHour, struAcsAlarmInfo.struTime.dwMinute, struAcsAlarmInfo.struTime.dwSecond);
-                
+                    pending.EventTime.dwYear, pending.EventTime.dwMonth, pending.EventTime.dwDay,
+                    pending.EventTime.dwHour, pending.EventTime.dwMinute, pending.EventTime.dwSecond);
+
                 string fileName = safePersonName + "_" + timeStr + ".jpg";
                 string filePath = dirPath + fileName;
 
                 try
                 {
-                    using (FileStream fs = new FileStream(filePath, FileMode.Create))
-                    {
-                        byte[] byPicData = new byte[struAcsAlarmInfo.dwPicDataLen];
-                        Marshal.Copy(struAcsAlarmInfo.pPicData, byPicData, 0, (int)struAcsAlarmInfo.dwPicDataLen);
-                        fs.Write(byPicData, 0, (int)struAcsAlarmInfo.dwPicDataLen);
-                        fs.Flush();
-                        fs.Close();
-                    }
+                    File.WriteAllBytes(filePath, pending.PicData);
                     Console.WriteLine("图片已保存: " + filePath);
-                    
-                    // 输出图片URL地址
+
                     string imageUrl = GetImageUrl(deviceName, safePersonName, fileName);
                     Console.WriteLine("图片URL: " + imageUrl);
-                    
-                    // 更新事件存储中的图片URL
-                    UpdateEventImageUrl(deviceIP, employeeNo, cardNo, time, imageUrl);
-                    if (mqttFaceEvent != null)
-                    {
-                        mqttFaceEvent.ImageUrl = imageUrl;
-                    }
+                    ACSEventMultiDeviceService.SharedEventStore.TryUpdateImageUrl(deviceIP, employeeNo, cardNo, imageUrl);
+                    faceEvent.ImageUrl = imageUrl;
                 }
                 catch (Exception ex)
                 {
@@ -510,17 +386,58 @@ namespace GetACSEvent
                 }
             }
 
-            if (isPersonFaceEvent && mqttFaceEvent != null)
+            try
             {
-                try
-                {
-                    PersonInfoPublisher.PublishFaceEvent(mqttFaceEvent);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine("发送personinfo失败: " + ex.Message);
-                }
+                PersonInfoPublisher.PublishFaceEvent(faceEvent);
             }
+            catch (Exception ex)
+            {
+                Console.WriteLine("发送personinfo失败: " + ex.Message);
+            }
+        }
+
+        private string ResolvePersonName(string employeeNo, string sNetUser)
+        {
+            string personName = "未知";
+
+            if (!string.IsNullOrEmpty(employeeNo) && !string.Equals(employeeNo, "0"))
+            {
+                if (ACSEventConsole.EmployeeNameMap.ContainsKey(employeeNo))
+                {
+                    return ACSEventConsole.EmployeeNameMap[employeeNo];
+                }
+
+                string[] possibleKeys = {
+                    employeeNo,
+                    employeeNo.Trim(),
+                    employeeNo.TrimStart('0'),
+                    employeeNo.PadLeft(employeeNo.Length + 1, '0'),
+                    employeeNo.ToUpper(),
+                    employeeNo.ToLower()
+                };
+
+                foreach (string key in possibleKeys)
+                {
+                    if (ACSEventConsole.EmployeeNameMap.ContainsKey(key))
+                    {
+                        return ACSEventConsole.EmployeeNameMap[key];
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(sNetUser))
+                {
+                    return sNetUser;
+                }
+
+                return "未知员工(" + employeeNo + ")";
+            }
+
+            if (!string.IsNullOrEmpty(sNetUser))
+            {
+                return sNetUser;
+            }
+
+            return personName;
         }
 
         /// <summary>
@@ -1117,41 +1034,6 @@ namespace GetACSEvent
                 {
                     Marshal.FreeHGlobal(buffer);
                 }
-            }
-        }
-
-        /// <summary>
-        /// 更新事件存储中的图片URL
-        /// </summary>
-        /// <param name="deviceIP">设备IP</param>
-        /// <param name="employeeNo">员工号</param>
-        /// <param name="cardNo">卡号</param>
-        /// <param name="time">时间</param>
-        /// <param name="imageUrl">图片URL</param>
-        private void UpdateEventImageUrl(string deviceIP, string employeeNo, string cardNo, string time, string imageUrl)
-        {
-            try
-            {
-                // 获取事件存储的快照
-                var events = ACSEventMultiDeviceService.SharedEventStore.Snapshot();
-                
-                // 查找匹配的事件（通过设备IP、员工号、卡号和时间来匹配）
-                foreach (var ev in events)
-                {
-                    if (ev.DeviceIP == deviceIP && 
-                        ev.EmployeeNo == employeeNo && 
-                        ev.CardNo == cardNo &&
-                        ev.ImageUrl == "") // 只更新还没有图片URL的事件
-                    {
-                        // 更新图片URL
-                        ev.ImageUrl = imageUrl;
-                        break;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("更新事件图片URL失败: " + ex.Message);
             }
         }
     }

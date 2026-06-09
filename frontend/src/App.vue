@@ -169,6 +169,7 @@ const stayWarningMinutes = ref<number | null>(null)
 const stayWarningHint = ref('当前使用服务端停留报警时间')
 let clockTimer: number | undefined
 let refreshTimer: number | undefined
+let dashboardEventSource: EventSource | undefined
 let audioContext: AudioContext | null = null
 let speechSynthesisRef: SpeechSynthesis | null = null
 let promptAudioUnlocked = false
@@ -1586,6 +1587,36 @@ function syncAlarmState(nextAlarms: AlarmItem[]) {
   }
 }
 
+function applyDashboardPayload(payload: DashboardResponse) {
+  const nextAlarms = (payload.alarms ?? []).map(normalizeAlarm)
+  const nextAbnormalMessages = (payload.abnormalMessages ?? []).map(normalizeAbnormalMessage)
+  const nextAreaAlert = normalizeAreaAlert(payload.areaAlert)
+  const previousAreaAlert = areaAlert.value
+
+  metrics.value = payload.metrics?.length ? payload.metrics : metrics.value
+  if (manualLimit.value === null) {
+    syncLimitDraftFromMetrics()
+    limitHint.value = formatLimitHint(null)
+  }
+  enterRecords.value = sortRecordsNewestFirst((payload.recentRecords ?? []).map(normalizeRecord))
+  stayPeople.value = sortRecordsNewestFirst((payload.stayPeople ?? []).map(normalizeRecord))
+  alarms.value = nextAlarms
+  abnormalMessages.value = nextAbnormalMessages
+  lastUpdatedAt.value = payload.generatedAt || new Date().toLocaleString()
+
+  const fallbackId = enterRecords.value[0]?.id || stayPeople.value[0]?.id || ''
+  const preferredId = payload.selectedRecordId || selectedRecordId.value || fallbackId
+  const exists =
+    enterRecords.value.some((record) => record.id === preferredId) ||
+    stayPeople.value.some((record) => record.id === preferredId)
+
+  selectedRecordId.value = exists ? preferredId : fallbackId
+  syncAreaAlertState(previousAreaAlert, nextAreaAlert)
+  syncAbnormalState(nextAbnormalMessages)
+  syncAlarmState(visibleAlarms.value)
+  loadError.value = ''
+}
+
 async function loadDashboard() {
   try {
     const response = await fetch(buildApiUrl('/api/dashboard'), {
@@ -1599,35 +1630,56 @@ async function loadDashboard() {
     }
 
     const payload = (await response.json()) as DashboardResponse
-    const nextAlarms = (payload.alarms ?? []).map(normalizeAlarm)
-    const nextAbnormalMessages = (payload.abnormalMessages ?? []).map(normalizeAbnormalMessage)
-    const nextAreaAlert = normalizeAreaAlert(payload.areaAlert)
-    const previousAreaAlert = areaAlert.value
-
-    metrics.value = payload.metrics?.length ? payload.metrics : metrics.value
-    if (manualLimit.value === null) {
-      syncLimitDraftFromMetrics()
-      limitHint.value = formatLimitHint(null)
-    }
-    enterRecords.value = sortRecordsNewestFirst((payload.recentRecords ?? []).map(normalizeRecord))
-    stayPeople.value = sortRecordsNewestFirst((payload.stayPeople ?? []).map(normalizeRecord))
-    alarms.value = nextAlarms
-    abnormalMessages.value = nextAbnormalMessages
-    lastUpdatedAt.value = payload.generatedAt || new Date().toLocaleString()
-
-    const fallbackId = enterRecords.value[0]?.id || stayPeople.value[0]?.id || ''
-    const preferredId = payload.selectedRecordId || selectedRecordId.value || fallbackId
-    const exists =
-      enterRecords.value.some((record) => record.id === preferredId) ||
-      stayPeople.value.some((record) => record.id === preferredId)
-
-    selectedRecordId.value = exists ? preferredId : fallbackId
-    syncAreaAlertState(previousAreaAlert, nextAreaAlert)
-    syncAbnormalState(nextAbnormalMessages)
-    syncAlarmState(visibleAlarms.value)
-    loadError.value = ''
+    applyDashboardPayload(payload)
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : '加载数据失败'
+  }
+}
+
+function startDashboardFallbackPolling() {
+  if (refreshTimer) {
+    return
+  }
+
+  refreshTimer = window.setInterval(() => {
+    void loadDashboard()
+  }, 10000)
+}
+
+function connectDashboardStream() {
+  if (typeof EventSource === 'undefined') {
+    startDashboardFallbackPolling()
+    return
+  }
+
+  if (dashboardEventSource) {
+    dashboardEventSource.close()
+    dashboardEventSource = undefined
+  }
+
+  const source = new EventSource(buildApiUrl('/api/dashboard/stream'))
+  dashboardEventSource = source
+
+  source.addEventListener('dashboard', (event) => {
+    try {
+      const payload = JSON.parse(event.data) as DashboardResponse
+      applyDashboardPayload(payload)
+    } catch (error) {
+      loadError.value = error instanceof Error ? error.message : '解析实时数据失败'
+    }
+  })
+
+  source.onopen = () => {
+    if (refreshTimer) {
+      window.clearInterval(refreshTimer)
+      refreshTimer = undefined
+    }
+  }
+
+  source.onerror = () => {
+    source.close()
+    dashboardEventSource = undefined
+    startDashboardFallbackPolling()
   }
 }
 
@@ -1645,12 +1697,10 @@ onMounted(() => {
   window.addEventListener('click', unlock, { passive: true })
   window.addEventListener('keydown', unlock)
 
-  loadDashboard()
+  void loadDashboard()
   loadSavedLimit()
   void loadStayWarningMinutes()
-  refreshTimer = window.setInterval(() => {
-    loadDashboard()
-  }, 3000)
+  connectDashboardStream()
 })
 
 onBeforeUnmount(() => {
@@ -1660,6 +1710,11 @@ onBeforeUnmount(() => {
 
   if (refreshTimer) {
     window.clearInterval(refreshTimer)
+  }
+
+  if (dashboardEventSource) {
+    dashboardEventSource.close()
+    dashboardEventSource = undefined
   }
 
   if (unlockAudioHandler) {

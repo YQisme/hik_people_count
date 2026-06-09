@@ -28,15 +28,33 @@ namespace GetACSEvent
         private readonly object _sync = new object();
         private readonly List<AcsEvent> _events = new List<AcsEvent>();
         private readonly int _capacity;
+        private long _revision;
+
+        public event Action Changed;
 
         public EventStore(int capacity = 1000)
         {
             _capacity = capacity > 0 ? capacity : 1000;
         }
 
+        public long Revision
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return _revision;
+                }
+            }
+        }
+
         public void Add(AcsEvent e)
         {
-            if (e == null) return;
+            if (e == null)
+            {
+                return;
+            }
+
             lock (_sync)
             {
                 _events.Add(e);
@@ -45,7 +63,50 @@ namespace GetACSEvent
                     int remove = _events.Count - _capacity;
                     _events.RemoveRange(0, remove);
                 }
+
+                _revision++;
             }
+
+            NotifyChanged();
+        }
+
+        public bool TryUpdateImageUrl(string deviceIP, string employeeNo, string cardNo, string imageUrl)
+        {
+            if (string.IsNullOrEmpty(imageUrl))
+            {
+                return false;
+            }
+
+            bool updated = false;
+            lock (_sync)
+            {
+                for (int i = _events.Count - 1; i >= 0; i--)
+                {
+                    AcsEvent ev = _events[i];
+                    if (ev == null)
+                    {
+                        continue;
+                    }
+
+                    if (ev.DeviceIP == deviceIP &&
+                        ev.EmployeeNo == employeeNo &&
+                        ev.CardNo == cardNo &&
+                        string.IsNullOrEmpty(ev.ImageUrl))
+                    {
+                        ev.ImageUrl = imageUrl;
+                        updated = true;
+                        _revision++;
+                        break;
+                    }
+                }
+            }
+
+            if (updated)
+            {
+                NotifyChanged();
+            }
+
+            return updated;
         }
 
         public List<AcsEvent> Snapshot()
@@ -55,6 +116,20 @@ namespace GetACSEvent
                 return new List<AcsEvent>(_events);
             }
         }
+
+        private void NotifyChanged()
+        {
+            Action handler = Changed;
+            if (handler != null)
+            {
+                try
+                {
+                    handler();
+                }
+                catch
+                {
+                }
+            }
+        }
     }
 }
-

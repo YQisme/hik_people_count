@@ -13,23 +13,27 @@ namespace GetACSEvent
             }
 
             RuntimeConfig config = RuntimeConfig.LoadDefault();
+            if (!config.PersonInfoMqttEnabled || string.IsNullOrEmpty(config.PersonInfoMqttHost))
+            {
+                return;
+            }
+
             string topic = ResolveTopic(ev, config);
-            var publisher = new MqttPublisher(
+            if (string.IsNullOrEmpty(topic))
+            {
+                return;
+            }
+
+            string payload = BuildPayload(ev, topic);
+            MqttConnectionPool.Publish(
                 config.PersonInfoMqttEnabled,
                 config.PersonInfoMqttHost,
                 config.PersonInfoMqttPort,
                 topic,
                 config.PersonInfoMqttClientId,
                 config.MqttUsername,
-                config.MqttPassword);
-
-            if (!publisher.IsEnabled)
-            {
-                return;
-            }
-
-            string payload = BuildPayload(ev, topic);
-            publisher.Publish(payload);
+                config.MqttPassword,
+                payload);
             Console.WriteLine("刷脸信息已发送到MQTT " + topic + ": " + (ev.PersonName ?? string.Empty));
         }
 

@@ -50,31 +50,15 @@ namespace GetACSEvent
                 return;
             }
 
-            TcpClient client = null;
-            NetworkStream stream = null;
-            try
-            {
-                client = new TcpClient();
-                IAsyncResult connectResult = client.BeginConnect(_host, _port, null, null);
-                if (!connectResult.AsyncWaitHandle.WaitOne(4000, false))
-                {
-                    throw new IOException("MQTT连接超时");
-                }
-                client.EndConnect(connectResult);
-                client.ReceiveTimeout = 4000;
-                client.SendTimeout = 4000;
-                stream = client.GetStream();
-
-                WritePacket(stream, BuildConnectPacket());
-                ReadConnAck(stream);
-                WritePacket(stream, BuildPublishPacket(_topic, payload));
-                WritePacket(stream, new byte[] { 0xE0, 0x00 });
-            }
-            finally
-            {
-                try { if (stream != null) stream.Dispose(); } catch { }
-                try { if (client != null) client.Close(); } catch { }
-            }
+            MqttConnectionPool.Publish(
+                _enabled,
+                _host,
+                _port,
+                _topic,
+                _clientId,
+                _username,
+                _password,
+                payload);
         }
 
         private byte[] BuildConnectPacket()

@@ -10,6 +10,8 @@ namespace GetACSEvent
         private Thread _thread;
         private bool _running;
         private bool? _lastBlocked;
+        private readonly object _evaluateSync = new object();
+        private DateTime _lastImmediateEvaluateUtc = DateTime.MinValue;
 
         public CapacityDoorControlService(ACSEventMultiDeviceService deviceService)
         {
@@ -24,6 +26,12 @@ namespace GetACSEvent
             }
 
             _running = true;
+            EventStore store = ACSEventMultiDeviceService.SharedEventStore;
+            if (store != null)
+            {
+                store.Changed += OnStoreChanged;
+            }
+
             _thread = new Thread(RunLoop);
             _thread.IsBackground = true;
             _thread.Start();
@@ -32,6 +40,12 @@ namespace GetACSEvent
         public void Stop()
         {
             _running = false;
+            EventStore store = ACSEventMultiDeviceService.SharedEventStore;
+            if (store != null)
+            {
+                store.Changed -= OnStoreChanged;
+            }
+
             try
             {
                 if (_thread != null && _thread.IsAlive)
@@ -44,41 +58,71 @@ namespace GetACSEvent
             }
         }
 
+        private void OnStoreChanged()
+        {
+            if (!_running)
+            {
+                return;
+            }
+
+            lock (_evaluateSync)
+            {
+                if ((DateTime.UtcNow - _lastImmediateEvaluateUtc).TotalMilliseconds < 200)
+                {
+                    return;
+                }
+
+                _lastImmediateEvaluateUtc = DateTime.UtcNow;
+            }
+
+            EvaluateCapacity();
+        }
+
         private void RunLoop()
         {
             while (_running)
             {
                 try
                 {
-                    RuntimeConfig runtimeConfig = RuntimeConfig.LoadDefault();
-                    int limitCount = runtimeConfig == null ? 500 : runtimeConfig.LimitCount;
-                    int currentCount = ResolveCurrentCount();
-                    bool shouldBlockEntry = currentCount >= limitCount;
-                    bool exitGraceActive = _deviceService.IsExitGraceActive(currentCount);
-                    if (exitGraceActive)
-                    {
-                        shouldBlockEntry = false;
-                    }
-
-                    _deviceService.ApplyCapacityDoorRule(shouldBlockEntry);
-
-                    if (!_lastBlocked.HasValue || _lastBlocked.Value != shouldBlockEntry)
-                    {
-                        Console.WriteLine(
-                            shouldBlockEntry
-                                ? "限员控制已开启：当前人数 " + currentCount + "，限制人数 " + limitCount + "，进门禁用，出门保持可用"
-                                : exitGraceActive
-                                    ? "检测到出门刷脸，已临时解除限员门禁限制，等待人数下降后再恢复限制"
-                                    : "限员控制已恢复：当前人数 " + currentCount + "，限制人数 " + limitCount + "，门禁恢复正常受控状态");
-                        _lastBlocked = shouldBlockEntry;
-                    }
+                    EvaluateCapacity();
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine("限员门控服务异常: " + ex.Message);
                 }
 
-                Thread.Sleep(1500);
+                Thread.Sleep(15000);
+            }
+        }
+
+        private void EvaluateCapacity()
+        {
+            if (_deviceService == null)
+            {
+                return;
+            }
+
+            RuntimeConfig runtimeConfig = RuntimeConfig.LoadDefault();
+            int limitCount = runtimeConfig == null ? 500 : runtimeConfig.LimitCount;
+            int currentCount = ResolveCurrentCount();
+            bool shouldBlockEntry = currentCount >= limitCount;
+            bool exitGraceActive = _deviceService.IsExitGraceActive(currentCount);
+            if (exitGraceActive)
+            {
+                shouldBlockEntry = false;
+            }
+
+            _deviceService.ApplyCapacityDoorRule(shouldBlockEntry);
+
+            if (!_lastBlocked.HasValue || _lastBlocked.Value != shouldBlockEntry)
+            {
+                Console.WriteLine(
+                    shouldBlockEntry
+                        ? "限员控制已开启：当前人数 " + currentCount + "，限制人数 " + limitCount + "，进门禁用，出门保持可用"
+                        : exitGraceActive
+                            ? "检测到出门刷脸，已临时解除限员门禁限制，等待人数下降后再恢复限制"
+                            : "限员控制已恢复：当前人数 " + currentCount + "，限制人数 " + limitCount + "，门禁恢复正常受控状态");
+                _lastBlocked = shouldBlockEntry;
             }
         }
 

@@ -1,6 +1,6 @@
 # 人员计数
 
-基于海康门禁 SDK 的人员进出监控与看板系统。后端采集门禁事件并对外提供 HTTP API，前端 Vue 看板实时展示在场人数、进出记录、报警与异常信息。
+基于海康门禁 SDK 的人员进出监控与看板系统。后端通过 **SDK 实时布防**（`NET_DVR_SetupAlarmChan_V41`）采集门禁刷脸事件，经异步队列处理后对外提供 HTTP API 与 **SSE 推送**；前端 Vue 看板实时展示在场人数、进出记录、报警与异常信息。
 
 ## 门禁设备
 
@@ -19,6 +19,8 @@
 │   ├── ACSEventConsole.sln  # 解决方案入口
 │   └── GetACSEvent/
 │       ├── ACSEventConsole.csproj   # 控制台服务（推荐）
+│       ├── AcsEventProcessingQueue.cs # SDK 回调异步队列
+│       ├── MqttConnectionPool.cs    # MQTT 长连接池
 │       ├── GetACSEvent.csproj       # 带界面的 SDK 示例程序
 │       ├── 启动服务.bat             # 先同步员工再启动后端
 │       └── bin/Debug/net8.0/            # dotnet 编译输出目录
@@ -91,7 +93,7 @@ yarn dev
 
 浏览器打开 **http://localhost:5173** 即可查看看板。
 
-Vite 开发服务器会将 `/api`、`/events`、`/images`、`/config`、`/health` 等请求代理到 `http://localhost:8081`，`.env.local` 中 `VITE_API_BASE_URL` 留空即可。
+Vite 开发服务器会将 `/api`、`/events`、`/images`、`/config`、`/health` 等请求代理到 `http://localhost:8081`（含 SSE 接口 `/api/dashboard/stream`），`.env.local` 中 `VITE_API_BASE_URL` 留空即可。
 
 ### 4. 生产部署（可选）
 
@@ -155,7 +157,7 @@ cp backend/config/EmployeeConfig.json.example backend/config/EmployeeConfig.json
 | `recentRecordCount`                         | number          | `10`              | 看板最近进出记录条数                      |
 | `exitGraceSeconds`                          | number          | `8`               | 出门宽限时间（秒）                        |
 | `capacityWarningRatio`                      | number          | `0.9`             | 人数接近上限时的预警比例（0–1）           |
-| `alarmScanSeconds`                          | number          | `5`               | 报警扫描间隔（秒）                        |
+| `alarmScanSeconds`                          | number          | `5`               | 报警扫描兜底间隔（秒）；刷脸事件会**立即触发**报警扫描，该字段仅作定时兜底 |
 | `mqttEnabled`                               | boolean         | `true`            | 是否启用门禁事件 MQTT                     |
 | `mqttHost` / `mqttPort`                     | string / number | —                 | MQTT Broker 地址与端口                    |
 | `mqttTopic`                                 | string          | `acs/alarm/event` | 门禁事件主题                              |
@@ -304,8 +306,8 @@ Windows 也可双击 `backend/scripts/同步员工配置.bat`，或使用 `backe
 
 | 用途 | 默认端口 | 配置字段 | 说明 |
 | ---- | -------- | -------- | ---- |
-| 后端门禁事件（C# SDK） | `8000` | `devices[].port` | `ACSEventConsole` 登录设备、接收刷脸事件 |
-| 员工同步脚本（ISAPI/HTTP） | `80` | `devices[].httpPort`（可选） | 调用 `UserInfo/Search` 拉取人员列表 |
+| 后端门禁事件（C# SDK） | `8000` | `devices[].port` | `ACSEventConsole` 登录设备、`SetupAlarmChan_V41` 实时布防接收刷脸事件 |
+| 员工同步 / 历史补查（ISAPI/HTTP） | `80` | `devices[].httpPort`（可选） | 调用 `UserInfo/Search`、`AcsEvent` 等 ISAPI 接口 |
 
 脚本**不会**读取 `port: 8000`，未配置 `httpPort` 时默认访问 `http://设备IP:80`。
 
@@ -407,22 +409,83 @@ cd backend/GetACSEvent/bin/Debug/net8.0
 ./ACSEventConsole.exe
 ```
 
+## 实时数据架构
+
+系统采用「设备推送 → 后端异步处理 → SSE 推送看板」链路，避免轮询带来的延迟。
+
+### 数据流
+
+```
+设备刷脸
+  → SDK 回调（NET_DVR_SetupAlarmChan_V41，毫秒级）
+  → AcsEventProcessingQueue（拷贝数据后立即返回，后台写盘 / MQTT / 控门）
+  → EventStore（Revision + Changed 事件）
+  → GET /api/dashboard/stream（SSE 推送给前端）
+  → 看板即时更新
+```
+
+若 SSE 连接失败，前端自动降级为每 10 秒轮询 `GET /api/dashboard`。
+
+### 后端优化要点
+
+| 模块 | 说明 |
+| ---- | ---- |
+| `AcsEventProcessingQueue` | SDK 回调线程只做 Marshal 拷贝与入队；写图片、MQTT、EventStore、限员控门等重活放到后台线程 |
+| `ACSEventMultiDeviceService` | 全局报警回调按设备 IP **只分发一次**，避免多设备重复处理 |
+| `MqttConnectionPool` | 按 `host:port:clientId` 复用 MQTT TCP 长连接，避免每条刷脸事件新建连接 |
+| `EventStore` | 维护 `Revision` 与 `Changed` 事件；新增事件或更新图片 URL 时通知下游 |
+| `AlarmMonitorService` | 刷脸后**立即**扫描并发布报警 MQTT；定时兜底扫描约 60 秒 |
+| `CapacityDoorControlService` | 事件触发限员评估；15 秒定时兜底（原 1.5 秒轮询） |
+
+### 海康接口分工
+
+| 通道 | 端口 | 用途 |
+| ---- | ---- | ---- |
+| **HCNetSDK** | `8000`（`devices[].port`） | 登录、实时布防、远程控门 |
+| **ISAPI (HTTP)** | `80/443`（`devices[].httpPort`） | 人员同步、历史事件查询、抓拍图下载 |
+
+常用 ISAPI 路径（本项目已使用或可用于扩展）：
+
+- `POST /ISAPI/AccessControl/UserInfo/Search` — 人员列表（员工同步脚本）
+- `POST /ISAPI/AccessControl/AcsEvent` — 历史门禁事件
+- `GET /ISAPI/AccessControl/Event/picture` — 事件抓拍图
+
+### 验证实时推送
+
+```bash
+# 1. 启动后端与前端（见「快速开始」）
+
+# 2. 浏览器直接查看 SSE 流
+http://localhost:8081/api/dashboard/stream
+
+# 3. 触发刷脸后，看板应在百毫秒级更新（无需等待 3 秒轮询）
+```
+
+---
+
 ## 主要 API 接口
 
-| 接口                 | 说明                           |
-| -------------------- | ------------------------------ |
-| `GET /api/dashboard` | 人员看板聚合数据（前端主接口） |
-| `GET /events`        | 原始门禁事件列表               |
-| `GET /config`        | 当前设备配置                   |
-| `GET /config/edit`   | 在线编辑配置                   |
-| `GET /images`        | 事件关联图片                   |
-| `GET /health`        | 健康检查                       |
+| 接口                          | 说明                                           |
+| ----------------------------- | ---------------------------------------------- |
+| `GET /api/dashboard`          | 人员看板聚合数据（一次性拉取）                 |
+| `GET /api/dashboard/stream`   | 看板 SSE 实时推送（前端默认使用）              |
+| `GET /events`                 | 原始门禁事件列表                               |
+| `GET /config`                 | 当前设备配置                                   |
+| `GET /config/edit`            | 在线编辑配置                                   |
+| `GET /images`                 | 事件关联图片                                   |
+| `GET /health`                 | 健康检查                                       |
 
 默认服务地址：`http://localhost:8081`
 
 更详细的接口说明见 `backend/GetACSEvent/事件API说明.md`。
 
 ## 常见问题
+
+**看板更新延迟较大**
+
+- 确认前端已连接 SSE：浏览器开发者工具 Network 中应存在 `/api/dashboard/stream` 长连接
+- 若 SSE 失败会自动降级为 10 秒轮询；检查后端 `/health` 与 `webPort` 是否可达
+- 设备到后端延迟通常毫秒级；若仅看板慢，多为前端未连上 SSE 或网络代理未转发流式响应
 
 **前端页面无数据**
 

@@ -9,8 +9,10 @@ namespace GetACSEvent
     {
         private readonly EventStore _store;
         private readonly object _sync = new object();
+        private readonly object _scanSync = new object();
         private Thread _thread;
         private bool _running;
+        private DateTime _lastImmediateScanUtc = DateTime.MinValue;
         private Dictionary<string, string> _lastSignatures = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private Dictionary<string, DashboardAlarm> _lastAlarms = new Dictionary<string, DashboardAlarm>(StringComparer.OrdinalIgnoreCase);
 
@@ -27,6 +29,11 @@ namespace GetACSEvent
             }
 
             _running = true;
+            if (_store != null)
+            {
+                _store.Changed += OnStoreChanged;
+            }
+
             _thread = new Thread(Loop);
             _thread.IsBackground = true;
             _thread.Start();
@@ -35,6 +42,11 @@ namespace GetACSEvent
         public void Stop()
         {
             _running = false;
+            if (_store != null)
+            {
+                _store.Changed -= OnStoreChanged;
+            }
+
             try
             {
                 if (_thread != null && _thread.IsAlive)
@@ -44,6 +56,33 @@ namespace GetACSEvent
             }
             catch
             {
+            }
+        }
+
+        private void OnStoreChanged()
+        {
+            if (!_running)
+            {
+                return;
+            }
+
+            lock (_scanSync)
+            {
+                if ((DateTime.UtcNow - _lastImmediateScanUtc).TotalMilliseconds < 200)
+                {
+                    return;
+                }
+
+                _lastImmediateScanUtc = DateTime.UtcNow;
+            }
+
+            try
+            {
+                ScanAndPublish();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("报警即时扫描异常: " + ex.Message);
             }
         }
 
@@ -60,13 +99,7 @@ namespace GetACSEvent
                     Console.WriteLine("报警监测线程异常: " + ex.Message);
                 }
 
-                int delaySeconds = RuntimeConfig.LoadDefault().AlarmScanSeconds;
-                if (delaySeconds <= 0)
-                {
-                    delaySeconds = 5;
-                }
-
-                for (int i = 0; i < delaySeconds * 10 && _running; i++)
+                for (int i = 0; i < 600 && _running; i++)
                 {
                     Thread.Sleep(100);
                 }
