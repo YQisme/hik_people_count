@@ -38,6 +38,28 @@
     "peopleCountMqttTopic": "people_count",
     "peopleCountMqttClientId": "acs-people-count-subscriber"
   },
+  "channels": [
+    {
+      "id": "channel-1",
+      "name": "通道一",
+      "limitCount": 500
+    },
+    {
+      "id": "channel-2",
+      "name": "通道二",
+      "limitCount": 500
+    },
+    {
+      "id": "channel-3",
+      "name": "通道三",
+      "limitCount": 500
+    },
+    {
+      "id": "channel-4",
+      "name": "通道四",
+      "limitCount": 500
+    }
+  ],
   "devices": [
     {
       "ip": "192.168.0.164",
@@ -51,8 +73,99 @@
       "areaID": "root000000",
       "deviceName": "测试门禁",
       "direction": "进",
+      "channelId": "channel-1",
       "controlDoorNo": 1,
       "doors": []
+    },
+    {
+      "ip": "192.168.0.165",
+      "userName": "admin",
+      "password": "your-password",
+      "port": 8000,
+      "enabled": true,
+      "name": "门禁2",
+      "remark": "通道一出门",
+      "deviceName": "通道一出门165",
+      "direction": "出",
+      "channelId": "channel-1"
+    },
+    {
+      "ip": "192.168.0.166",
+      "userName": "admin",
+      "password": "your-password",
+      "port": 8000,
+      "enabled": true,
+      "name": "门禁3",
+      "remark": "通道二进门",
+      "deviceName": "通道二进门166",
+      "direction": "进",
+      "channelId": "channel-2",
+      "controlDoorNo": 1,
+      "doors": []
+    },
+    {
+      "ip": "192.168.0.167",
+      "userName": "admin",
+      "password": "your-password",
+      "port": 8000,
+      "enabled": true,
+      "name": "门禁4",
+      "remark": "通道二出门",
+      "deviceName": "通道二出门167",
+      "direction": "出",
+      "channelId": "channel-2"
+    },
+    {
+      "ip": "192.168.0.168",
+      "userName": "admin",
+      "password": "your-password",
+      "port": 8000,
+      "enabled": true,
+      "name": "门禁5",
+      "remark": "通道三进门",
+      "deviceName": "通道三进门168",
+      "direction": "进",
+      "channelId": "channel-3",
+      "controlDoorNo": 1,
+      "doors": []
+    },
+    {
+      "ip": "192.168.0.169",
+      "userName": "admin",
+      "password": "your-password",
+      "port": 8000,
+      "enabled": true,
+      "name": "门禁6",
+      "remark": "通道三出门",
+      "deviceName": "通道三出门169",
+      "direction": "出",
+      "channelId": "channel-3"
+    },
+    {
+      "ip": "192.168.0.170",
+      "userName": "admin",
+      "password": "your-password",
+      "port": 8000,
+      "enabled": true,
+      "name": "门禁7",
+      "remark": "通道四进门",
+      "deviceName": "通道四进门170",
+      "direction": "进",
+      "channelId": "channel-4",
+      "controlDoorNo": 1,
+      "doors": []
+    },
+    {
+      "ip": "192.168.0.171",
+      "userName": "admin",
+      "password": "your-password",
+      "port": 8000,
+      "enabled": true,
+      "name": "门禁8",
+      "remark": "通道四出门",
+      "deviceName": "通道四出门171",
+      "direction": "出",
+      "channelId": "channel-4"
     }
   ]
 }

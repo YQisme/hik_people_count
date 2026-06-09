@@ -891,6 +891,11 @@ namespace GetACSEvent
             get { return m_DeviceIP; }
         }
 
+        public bool IsOnline
+        {
+            get { return m_UserID >= 0 && m_lAlarmHandle >= 0; }
+        }
+
         public bool BlockGateway(int gatewayIndex)
         {
             if (gatewayIndex <= 0)

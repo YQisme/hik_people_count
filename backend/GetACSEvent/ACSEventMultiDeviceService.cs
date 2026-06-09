@@ -333,6 +333,17 @@ namespace GetACSEvent
             Console.WriteLine("多门禁事件监控服务已停止");
         }
 
+        public bool IsDeviceOnline(string deviceIP)
+        {
+            if (string.IsNullOrWhiteSpace(deviceIP))
+            {
+                return false;
+            }
+
+            ACSEventService service;
+            return m_ServiceByIp.TryGetValue(deviceIP.Trim(), out service) && service != null && service.IsOnline;
+        }
+
         public void ApplyCapacityDoorRule(bool blockEntry)
         {
             m_IsEntryBlocked = blockEntry;

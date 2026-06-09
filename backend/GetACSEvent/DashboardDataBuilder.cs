@@ -81,16 +81,28 @@ namespace GetACSEvent
     public class DashboardDataBuilder
     {
         private readonly List<AcsEvent> _events;
+        private readonly HashSet<string> _deviceFilter;
+        private readonly int? _overrideLimitCount;
 
-        public DashboardDataBuilder(List<AcsEvent> events)
+        public DashboardDataBuilder(List<AcsEvent> events, string channelId = null)
         {
             _events = events ?? new List<AcsEvent>();
+            if (!string.IsNullOrWhiteSpace(channelId))
+            {
+                _deviceFilter = DeviceConfigStore.GetChannelDeviceIPs(channelId);
+                int limitCount = DeviceConfigStore.GetChannelLimitCount(channelId);
+                if (limitCount > 0)
+                {
+                    _overrideLimitCount = limitCount;
+                }
+            }
         }
 
         public DashboardPayload Build()
         {
             var config = ReadConfig();
-            var sortedEvents = new List<AcsEvent>(_events);
+            var filteredEvents = GetFilteredEvents();
+            var sortedEvents = new List<AcsEvent>(filteredEvents);
             sortedEvents.Sort(delegate (AcsEvent a, AcsEvent b)
             {
                 return b.TimeUtc.CompareTo(a.TimeUtc);
@@ -143,7 +155,7 @@ namespace GetACSEvent
         private List<DashboardRecord> BuildStayPeople(DashboardConfig config)
         {
             var latestPerPerson = new Dictionary<string, AcsEvent>(StringComparer.OrdinalIgnoreCase);
-            var eventsAsc = new List<AcsEvent>(_events);
+            var eventsAsc = new List<AcsEvent>(GetFilteredEvents());
             eventsAsc.Sort(delegate (AcsEvent a, AcsEvent b)
             {
                 return a.TimeUtc.CompareTo(b.TimeUtc);
@@ -201,7 +213,7 @@ namespace GetACSEvent
                 }
             }
 
-            if (peopleCount != null && peopleCount.HasData)
+            if (peopleCount != null && peopleCount.HasData && !HasDeviceFilter())
             {
                 enterCount = peopleCount.InCount;
                 exitCount = peopleCount.OutCount;
@@ -223,7 +235,7 @@ namespace GetACSEvent
             int currentStayCount = stayPeople.Count;
             string triggeredAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
-            if (peopleCount != null && peopleCount.HasData)
+            if (peopleCount != null && peopleCount.HasData && !HasDeviceFilter())
             {
                 currentStayCount = peopleCount.TotalCount;
                 if (!string.IsNullOrEmpty(peopleCount.UpdatedAt))
@@ -232,7 +244,7 @@ namespace GetACSEvent
                 }
             }
 
-            if (areaAlert != null && areaAlert.IsActive)
+            if (areaAlert != null && areaAlert.IsActive && !HasDeviceFilter())
             {
                 alarms.Add(new DashboardAlarm
                 {
@@ -610,9 +622,44 @@ namespace GetACSEvent
             return (value ?? string.Empty).Trim();
         }
 
-        private static DashboardConfig ReadConfig()
+        private DashboardConfig ReadConfig()
         {
-            return new DashboardConfig(RuntimeConfig.LoadDefault());
+            var config = new DashboardConfig(RuntimeConfig.LoadDefault());
+            if (_overrideLimitCount.HasValue)
+            {
+                config.LimitCount = _overrideLimitCount.Value;
+            }
+
+            return config;
+        }
+
+        private List<AcsEvent> GetFilteredEvents()
+        {
+            if (!HasDeviceFilter())
+            {
+                return _events;
+            }
+
+            var filtered = new List<AcsEvent>();
+            foreach (var ev in _events)
+            {
+                if (ev == null || string.IsNullOrEmpty(ev.DeviceIP))
+                {
+                    continue;
+                }
+
+                if (_deviceFilter.Contains(ev.DeviceIP))
+                {
+                    filtered.Add(ev);
+                }
+            }
+
+            return filtered;
+        }
+
+        private bool HasDeviceFilter()
+        {
+            return _deviceFilter != null && _deviceFilter.Count > 0;
         }
     }
 }

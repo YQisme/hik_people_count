@@ -344,13 +344,25 @@ namespace GetACSEvent
             string path = ctx.Request.Url.AbsolutePath.ToLowerInvariant();
             if (path == "/api/dashboard/stream" && ctx.Request.HttpMethod == "GET")
             {
-                HandleDashboardStream(ctx, stream);
+                HandleDashboardStream(ctx, stream, ReadQueryValue(ctx.Request, "channelId"));
                 return;
             }
             if (path == "/api/dashboard" || path == "/dashboard-data")
             {
-                var payload = new DashboardDataBuilder(_store.Snapshot()).Build();
+                string channelId = ReadQueryValue(ctx.Request, "channelId");
+                var payload = new DashboardDataBuilder(_store.Snapshot(), channelId).Build();
                 Respond(ctx, 200, "application/json", SerializeDashboard(payload));
+                return;
+            }
+            if (path == "/api/channels/overview")
+            {
+                var overview = new ChannelOverviewBuilder(_store.Snapshot()).Build();
+                Respond(ctx, 200, "application/json", SerializeChannelOverview(overview));
+                return;
+            }
+            if (path == "/api/channels")
+            {
+                Respond(ctx, 200, "application/json", SerializeChannels());
                 return;
             }
             if (path == "/api/limit-count" && ctx.Request.HttpMethod == "GET")
@@ -408,7 +420,8 @@ namespace GetACSEvent
             }
             if (path == "/api/devices")
             {
-                Respond(ctx, 200, "application/json", SerializeDevices());
+                string channelId = ReadQueryValue(ctx.Request, "channelId");
+                Respond(ctx, 200, "application/json", SerializeDevices(channelId));
                 return;
             }
             if (path == "/api/acs-events/history" && ctx.Request.HttpMethod == "POST")
@@ -660,7 +673,17 @@ namespace GetACSEvent
             try { return Uri.UnescapeDataString(value); } catch { return value; }
         }
 
-        private void HandleDashboardStream(SimpleHttpContext ctx, NetworkStream stream)
+        private static string ReadQueryValue(SimpleHttpRequest request, string key)
+        {
+            if (request == null || request.QueryString == null || string.IsNullOrEmpty(key))
+            {
+                return string.Empty;
+            }
+
+            return (request.QueryString[key] ?? string.Empty).Trim();
+        }
+
+        private void HandleDashboardStream(SimpleHttpContext ctx, NetworkStream stream, string channelId)
         {
             ctx.Response.Headers["X-Stream-Handled"] = "1";
 
@@ -688,7 +711,7 @@ namespace GetACSEvent
                     long revision = _store.Revision;
                     if (revision != lastRevision)
                     {
-                        DashboardPayload payload = new DashboardDataBuilder(_store.Snapshot()).Build();
+                        DashboardPayload payload = new DashboardDataBuilder(_store.Snapshot(), channelId).Build();
                         string json = SerializeDashboard(payload);
                         string sse = "event: dashboard\ndata: " + json + "\n\n";
                         byte[] bytes = Encoding.UTF8.GetBytes(sse);
@@ -1024,19 +1047,33 @@ namespace GetACSEvent
             sb.Append('}');
         }
 
-        private static string SerializeDevices()
+        private static string SerializeDevices(string channelId = null)
         {
             var devices = DeviceConfigStore.GetEnabledDevices();
+            HashSet<string> channelDeviceIPs = null;
+            if (!string.IsNullOrWhiteSpace(channelId))
+            {
+                channelDeviceIPs = DeviceConfigStore.GetChannelDeviceIPs(channelId);
+            }
+
             var sb = new StringBuilder();
             sb.Append('[');
+            bool first = true;
             for (int i = 0; i < devices.Count; i++)
             {
                 var device = devices[i];
-                if (i > 0)
+                if (channelDeviceIPs != null && channelDeviceIPs.Count > 0 &&
+                    !channelDeviceIPs.Contains(device.IP ?? string.Empty))
+                {
+                    continue;
+                }
+
+                if (!first)
                 {
                     sb.Append(',');
                 }
 
+                first = false;
                 sb.Append('{');
                 AppendJson(sb, "ip", device.IP); sb.Append(',');
                 AppendJson(sb, "name", device.Name); sb.Append(',');
@@ -1048,6 +1085,92 @@ namespace GetACSEvent
             }
             sb.Append(']');
             return sb.ToString();
+        }
+
+        private static string SerializeChannels()
+        {
+            var channels = DeviceConfigStore.GetChannels();
+            var sb = new StringBuilder();
+            sb.Append('[');
+            for (int i = 0; i < channels.Count; i++)
+            {
+                var channel = channels[i];
+                if (i > 0)
+                {
+                    sb.Append(',');
+                }
+
+                sb.Append('{');
+                AppendJson(sb, "id", channel.Id); sb.Append(',');
+                AppendJson(sb, "name", channel.Name); sb.Append(',');
+                sb.Append("\"limitCount\":").Append(channel.LimitCount > 0 ? channel.LimitCount : DeviceConfigStore.GetChannelLimitCount(channel.Id)); sb.Append(',');
+                sb.Append("\"deviceCount\":").Append(DeviceConfigStore.CountChannelDevices(channel.Id));
+                sb.Append('}');
+            }
+            sb.Append(']');
+            return sb.ToString();
+        }
+
+        private static string SerializeChannelOverview(ChannelOverviewPayload payload)
+        {
+            var sb = new StringBuilder();
+            sb.Append('{');
+            AppendJson(sb, "generatedAt", payload == null ? string.Empty : payload.GeneratedAt); sb.Append(',');
+            sb.Append("\"channels\":[");
+            if (payload?.Channels != null)
+            {
+                for (int i = 0; i < payload.Channels.Count; i++)
+                {
+                    var item = payload.Channels[i];
+                    if (i > 0)
+                    {
+                        sb.Append(',');
+                    }
+
+                    sb.Append('{');
+                    AppendJson(sb, "id", item.Id); sb.Append(',');
+                    AppendJson(sb, "name", item.Name); sb.Append(',');
+                    sb.Append("\"limitCount\":").Append(item.LimitCount); sb.Append(',');
+                    sb.Append("\"enterCount\":").Append(item.EnterCount); sb.Append(',');
+                    sb.Append("\"exitCount\":").Append(item.ExitCount); sb.Append(',');
+                    sb.Append("\"stayCount\":").Append(item.StayCount); sb.Append(',');
+                    sb.Append("\"alarmCount\":").Append(item.AlarmCount); sb.Append(',');
+                    AppendJson(sb, "accessRuleMode", item.AccessRuleMode); sb.Append(',');
+                    sb.Append("\"deviceCount\":").Append(item.DeviceCount); sb.Append(',');
+                    sb.Append("\"onlineDeviceCount\":").Append(item.OnlineDeviceCount); sb.Append(',');
+                    AppendChannelDevices(sb, item.Devices);
+                    sb.Append('}');
+                }
+            }
+            sb.Append(']');
+            sb.Append('}');
+            return sb.ToString();
+        }
+
+        private static void AppendChannelDevices(StringBuilder sb, List<ChannelDeviceStatusItem> devices)
+        {
+            sb.Append("\"devices\":[");
+            if (devices != null)
+            {
+                for (int i = 0; i < devices.Count; i++)
+                {
+                    var device = devices[i];
+                    if (i > 0)
+                    {
+                        sb.Append(',');
+                    }
+
+                    sb.Append('{');
+                    AppendJson(sb, "ip", device.Ip); sb.Append(',');
+                    AppendJson(sb, "name", device.Name); sb.Append(',');
+                    AppendJson(sb, "deviceName", device.DeviceName); sb.Append(',');
+                    AppendJson(sb, "direction", device.Direction); sb.Append(',');
+                    AppendJsonBool(sb, "online", device.Online); sb.Append(',');
+                    AppendJson(sb, "status", device.Status);
+                    sb.Append('}');
+                }
+            }
+            sb.Append(']');
         }
 
         private static string SerializeHistoryError(string message)

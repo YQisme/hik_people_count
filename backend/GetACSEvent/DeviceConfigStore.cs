@@ -10,12 +10,27 @@ namespace GetACSEvent
     public class DeviceConfigDocument
     {
         public DeviceConfigGlobalSettings Config { get; set; }
+        public List<DeviceConfigChannelEntry> Channels { get; set; }
         public List<DeviceConfigDeviceEntry> Devices { get; set; }
 
         public DeviceConfigDocument()
         {
             Config = DeviceConfigGlobalSettings.CreateDefault();
+            Channels = new List<DeviceConfigChannelEntry>();
             Devices = new List<DeviceConfigDeviceEntry>();
+        }
+    }
+
+    public class DeviceConfigChannelEntry
+    {
+        public string Id { get; set; }
+        public string Name { get; set; }
+        public int LimitCount { get; set; }
+
+        public DeviceConfigChannelEntry()
+        {
+            Id = string.Empty;
+            Name = string.Empty;
         }
     }
 
@@ -122,6 +137,7 @@ namespace GetACSEvent
         public int ControlDoorNo { get; set; }
         public string ZoneName { get; set; }
         public string DoorName { get; set; }
+        public string ChannelId { get; set; }
         public List<DeviceConfigDoorEntry> Doors { get; set; }
 
         public DeviceConfigDeviceEntry()
@@ -140,6 +156,7 @@ namespace GetACSEvent
             ControlDoorNo = 1;
             ZoneName = string.Empty;
             DoorName = string.Empty;
+            ChannelId = string.Empty;
             Doors = new List<DeviceConfigDoorEntry>();
         }
 
@@ -252,6 +269,11 @@ namespace GetACSEvent
                 document.Devices = new List<DeviceConfigDeviceEntry>();
             }
 
+            if (document.Channels == null)
+            {
+                document.Channels = new List<DeviceConfigChannelEntry>();
+            }
+
             string json = JsonSerializer.Serialize(document, JsonOptions);
             File.WriteAllText(path, json, System.Text.Encoding.UTF8);
         }
@@ -348,6 +370,109 @@ namespace GetACSEvent
             }
 
             return result;
+        }
+
+        public static List<DeviceConfigChannelEntry> GetChannels(string path = null)
+        {
+            var document = Load(path);
+            var channels = new List<DeviceConfigChannelEntry>();
+            if (document?.Channels != null)
+            {
+                foreach (var channel in document.Channels)
+                {
+                    if (channel == null || string.IsNullOrWhiteSpace(channel.Id))
+                    {
+                        continue;
+                    }
+
+                    channels.Add(new DeviceConfigChannelEntry
+                    {
+                        Id = CleanText(channel.Id),
+                        Name = string.IsNullOrWhiteSpace(channel.Name) ? CleanText(channel.Id) : CleanText(channel.Name),
+                        LimitCount = channel.LimitCount > 0 ? channel.LimitCount : 0
+                    });
+                }
+            }
+
+            if (channels.Count > 0)
+            {
+                return channels;
+            }
+
+            channels.Add(new DeviceConfigChannelEntry
+            {
+                Id = "default",
+                Name = "默认通道",
+                LimitCount = document?.Config?.LimitCount > 0 ? document.Config.LimitCount : 500
+            });
+            return channels;
+        }
+
+        public static HashSet<string> GetChannelDeviceIPs(string channelId, string path = null)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(channelId))
+            {
+                return result;
+            }
+
+            var document = Load(path);
+            if (document?.Devices == null)
+            {
+                return result;
+            }
+
+            string normalizedChannelId = CleanText(channelId);
+            foreach (var device in document.Devices)
+            {
+                if (device == null || !device.Enabled || string.IsNullOrWhiteSpace(device.IP))
+                {
+                    continue;
+                }
+
+                string deviceChannelId = CleanText(device.ChannelId);
+                if (!string.Equals(deviceChannelId, normalizedChannelId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                result.Add(CleanText(device.IP));
+            }
+
+            return result;
+        }
+
+        public static int GetChannelLimitCount(string channelId, string path = null)
+        {
+            var document = Load(path);
+            int globalLimit = document?.Config?.LimitCount > 0 ? document.Config.LimitCount : 500;
+            if (string.IsNullOrWhiteSpace(channelId) || document?.Channels == null)
+            {
+                return globalLimit;
+            }
+
+            string normalizedChannelId = CleanText(channelId);
+            foreach (var channel in document.Channels)
+            {
+                if (channel == null || string.IsNullOrWhiteSpace(channel.Id))
+                {
+                    continue;
+                }
+
+                if (!string.Equals(CleanText(channel.Id), normalizedChannelId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                return channel.LimitCount > 0 ? channel.LimitCount : globalLimit;
+            }
+
+            return globalLimit;
+        }
+
+        public static int CountChannelDevices(string channelId, string path = null)
+        {
+            return GetChannelDeviceIPs(channelId, path).Count;
         }
 
         public static string GetDeviceField(string deviceIP, string fieldName, string path = null)
