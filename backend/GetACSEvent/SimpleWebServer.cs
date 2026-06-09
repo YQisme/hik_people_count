@@ -398,6 +398,56 @@ namespace GetACSEvent
                     return;
                 }
             }
+            if (path == "/api/devices")
+            {
+                Respond(ctx, 200, "application/json", SerializeDevices());
+                return;
+            }
+            if (path == "/api/acs-events/history" && ctx.Request.HttpMethod == "POST")
+            {
+                using (var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
+                {
+                    string body = reader.ReadToEnd();
+                    string deviceIP = ExtractStringValue(body, "deviceIP");
+                    string startTime = ExtractStringValue(body, "startTime");
+                    string endTime = ExtractStringValue(body, "endTime");
+                    if (string.IsNullOrEmpty(deviceIP) || string.IsNullOrEmpty(startTime) || string.IsNullOrEmpty(endTime))
+                    {
+                        Respond(ctx, 400, "application/json", "{\"message\":\"deviceIP, startTime and endTime are required\"}");
+                        return;
+                    }
+
+                    int major = body.IndexOf("\"major\"", StringComparison.OrdinalIgnoreCase) >= 0
+                        ? ExtractIntValue(body, "major")
+                        : 5;
+                    int minor = body.IndexOf("\"minor\"", StringComparison.OrdinalIgnoreCase) >= 0
+                        ? ExtractIntValue(body, "minor")
+                        : 0;
+
+                    var query = new AcsEventHistoryQuery
+                    {
+                        DeviceIP = deviceIP,
+                        StartTime = startTime,
+                        EndTime = endTime,
+                        Major = major,
+                        Minor = minor,
+                        MaxResults = ExtractIntValue(body, "maxResults") > 0 ? ExtractIntValue(body, "maxResults") : 30,
+                        SearchResultPosition = ExtractIntValue(body, "searchResultPosition"),
+                        FetchAll = !string.Equals(ExtractStringValue(body, "fetchAll"), "false", StringComparison.OrdinalIgnoreCase),
+                        MaxTotal = ExtractIntValue(body, "maxTotal") > 0 ? ExtractIntValue(body, "maxTotal") : 500
+                    };
+
+                    AcsEventHistoryResult history = AcsEventIsapiClient.QueryHistory(query);
+                    if (!string.IsNullOrEmpty(history.ErrorMessage))
+                    {
+                        Respond(ctx, 502, "application/json", SerializeHistoryError(history.ErrorMessage));
+                        return;
+                    }
+
+                    Respond(ctx, 200, "application/json", SerializeHistoryResult(history));
+                    return;
+                }
+            }
             if (path == "/api/employee")
             {
                 string keyword = (ctx.Request.QueryString["q"] ?? string.Empty).Trim();
@@ -492,6 +542,11 @@ namespace GetACSEvent
                 }
                 return;
             }
+            if (path == "/api/acs-events/picture" && ctx.Request.HttpMethod == "GET")
+            {
+                HandleAcsEventPictureRequest(ctx);
+                return;
+            }
             if (path.StartsWith("/images/"))
             {
                 HandleImageRequest(ctx, path);
@@ -543,6 +598,8 @@ namespace GetACSEvent
             sb.Append("<li><a href=\"/api/employee\">/api/employee</a> - 本地人员表 JSON 接口</li>");
             sb.Append("<li><a href=\"/api/employee/search?q=yq\">/api/employee/search?q=关键字</a> - 人员检索接口</li>");
             sb.Append("<li><a href=\"/events\">/events</a> - 最近事件原始 JSON</li>");
+            sb.Append("<li><a href=\"/api/devices\">/api/devices</a> - 已启用门禁设备列表</li>");
+            sb.Append("<li>POST /api/acs-events/history - 按时间范围查询设备历史事件</li>");
             sb.Append("<li><a href=\"/config\">/config</a> - 当前设备配置 JSON</li>");
             sb.Append("<li><a href=\"/config/edit\">/config/edit</a> - 在线编辑配置</li>");
             sb.Append("<li><a href=\"/images\">/images</a> - 事件图片列表</li>");
@@ -904,6 +961,53 @@ namespace GetACSEvent
             sb.Append('}');
         }
 
+        private static string SerializeDevices()
+        {
+            var devices = DeviceConfigStore.GetEnabledDevices();
+            var sb = new StringBuilder();
+            sb.Append('[');
+            for (int i = 0; i < devices.Count; i++)
+            {
+                var device = devices[i];
+                if (i > 0)
+                {
+                    sb.Append(',');
+                }
+
+                sb.Append('{');
+                AppendJson(sb, "ip", device.IP); sb.Append(',');
+                AppendJson(sb, "name", device.Name); sb.Append(',');
+                AppendJson(sb, "deviceName", device.DeviceName); sb.Append(',');
+                AppendJson(sb, "direction", device.Direction); sb.Append(',');
+                sb.Append("\"httpPort\":").Append(device.HttpPort > 0 ? device.HttpPort : 80); sb.Append(',');
+                AppendJsonBool(sb, "useHttps", device.UseHttps);
+                sb.Append('}');
+            }
+            sb.Append(']');
+            return sb.ToString();
+        }
+
+        private static string SerializeHistoryError(string message)
+        {
+            var sb = new StringBuilder();
+            sb.Append('{');
+            AppendJson(sb, "message", message);
+            sb.Append('}');
+            return sb.ToString();
+        }
+
+        private static string SerializeHistoryResult(AcsEventHistoryResult history)
+        {
+            var sb = new StringBuilder();
+            sb.Append('{');
+            sb.Append("\"events\":");
+            sb.Append(SerializeEvents(history.Events ?? new List<AcsEvent>())); sb.Append(',');
+            sb.Append("\"totalMatches\":").Append(history.TotalMatches); sb.Append(',');
+            AppendJsonBool(sb, "hasMore", history.HasMore);
+            sb.Append('}');
+            return sb.ToString();
+        }
+
         private static string SerializeEvents(List<AcsEvent> list)
         {
             list.Sort(delegate (AcsEvent a, AcsEvent b)
@@ -1083,6 +1187,39 @@ namespace GetACSEvent
                 .Replace("\\n", "\n")
                 .Replace("\\t", "\t")
                 .Replace("\\\\", "\\");
+        }
+
+        private void HandleAcsEventPictureRequest(SimpleHttpContext ctx)
+        {
+            try
+            {
+                string deviceIP = (ctx.Request.QueryString["deviceIP"] ?? string.Empty).Trim();
+                string source = (ctx.Request.QueryString["source"] ?? string.Empty).Trim();
+                string serialNo = (ctx.Request.QueryString["serialNo"] ?? string.Empty).Trim();
+                string employeeNo = (ctx.Request.QueryString["employeeNo"] ?? string.Empty).Trim();
+
+                if (string.IsNullOrEmpty(deviceIP))
+                {
+                    Respond(ctx, 400, "text/plain", "deviceIP is required");
+                    return;
+                }
+
+                byte[] imageBytes = AcsEventImageResolver.DownloadPicture(deviceIP, source, serialNo, employeeNo);
+                if (imageBytes == null || imageBytes.Length == 0)
+                {
+                    Respond(ctx, 404, "text/plain", "Image not found");
+                    return;
+                }
+
+                string contentType = imageBytes.Length >= 2 && imageBytes[0] == 0x89 && imageBytes[1] == 0x50
+                    ? "image/png"
+                    : "image/jpeg";
+                RespondBinary(ctx, 200, contentType, imageBytes);
+            }
+            catch (Exception ex)
+            {
+                Respond(ctx, 500, "text/plain", "Internal server error: " + ex.Message);
+            }
         }
 
         private void HandleImageRequest(SimpleHttpContext ctx, string path)

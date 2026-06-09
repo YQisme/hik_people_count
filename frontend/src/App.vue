@@ -100,6 +100,34 @@ type DashboardResponse = {
   abnormalMessages?: Partial<AbnormalMessageItem>[]
 }
 
+type DeviceOption = {
+  ip: string
+  name: string
+  deviceName: string
+}
+
+type HistoryEventItem = {
+  time: string
+  timeUtc?: string
+  deviceIP: string
+  deviceName: string
+  majorType: string
+  minorType: string
+  cardNo: string
+  employeeNo: string
+  personName: string
+  doorNo: number
+  direction?: string
+  imageUrl?: string
+}
+
+type HistoryEventsResponse = {
+  events: HistoryEventItem[]
+  totalMatches: number
+  hasMore: boolean
+  message?: string
+}
+
 type JsonRecord = Record<string, unknown>
 
 const systemTitle = '限员管控系统'
@@ -150,6 +178,20 @@ let unlockAudioHandler: (() => void) | null = null
 let areaAlertBroadcastTimer: number | undefined
 const handledAreaAlertIds = ref<string[]>([])
 const handledAbnormalIds = ref<string[]>([])
+const historyVisible = ref(false)
+const historyLoading = ref(false)
+const historyError = ref('')
+const historyDevices = ref<DeviceOption[]>([])
+const historyDeviceIP = ref('')
+const historyStartDate = ref('')
+const historyStartClock = ref('')
+const historyEndDate = ref('')
+const historyEndClock = ref('')
+const historyEvents = ref<AccessRecord[]>([])
+const historyTotalMatches = ref(0)
+const historyPage = ref(1)
+const historyListRef = ref<HTMLElement | null>(null)
+const HISTORY_PAGE_SIZE = 20
 
 type AudioPromptKey =
   | 'alarm'
@@ -214,6 +256,19 @@ function buildApiUrl(path: string) {
     return normalizedPath
   }
   return `${apiBaseUrl}${normalizedPath}`
+}
+
+function resolveImageUrl(url?: string) {
+  const raw = url?.trim()
+  if (!raw) {
+    return ''
+  }
+
+  if (/^https?:\/\//i.test(raw)) {
+    return raw
+  }
+
+  return buildApiUrl(raw)
 }
 
 function getMetricValue(label: string, fallback: number) {
@@ -396,6 +451,205 @@ function normalizeDirection(value?: string) {
   return raw || '--'
 }
 
+function padDatePart(value: number) {
+  return `${value}`.padStart(2, '0')
+}
+
+function formatLocalDate(date: Date) {
+  return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`
+}
+
+function formatLocalClock(date: Date) {
+  return `${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}`
+}
+
+function setHistoryRange(start: Date, end: Date) {
+  historyStartDate.value = formatLocalDate(start)
+  historyStartClock.value = formatLocalClock(start)
+  historyEndDate.value = formatLocalDate(end)
+  historyEndClock.value = formatLocalClock(end)
+}
+
+function buildHistoryDateTime(dateValue: string, clockValue: string) {
+  const date = dateValue.trim()
+  const clock = clockValue.trim()
+  if (!date || !clock) {
+    return ''
+  }
+
+  const normalizedClock = /^\d{2}:\d{2}:\d{2}$/.test(clock) ? clock : `${clock}:00`
+  return `${date}T${normalizedClock}`
+}
+
+function initHistoryTimeRange() {
+  const now = new Date()
+  const start = new Date(now)
+  start.setHours(0, 0, 0, 0)
+  setHistoryRange(start, now)
+}
+
+function applyHistoryPreset(preset: 'today' | 'yesterday' | 'last7' | 'last30') {
+  const now = new Date()
+  const end = new Date(now)
+  const start = new Date(now)
+
+  switch (preset) {
+    case 'today':
+      start.setHours(0, 0, 0, 0)
+      break
+    case 'yesterday':
+      start.setDate(start.getDate() - 1)
+      start.setHours(0, 0, 0, 0)
+      end.setDate(end.getDate() - 1)
+      end.setHours(23, 59, 59, 0)
+      break
+    case 'last7':
+      start.setDate(start.getDate() - 6)
+      start.setHours(0, 0, 0, 0)
+      break
+    case 'last30':
+      start.setDate(start.getDate() - 29)
+      start.setHours(0, 0, 0, 0)
+      break
+  }
+
+  setHistoryRange(start, end)
+}
+
+function normalizeHistoryEvent(event: Partial<HistoryEventItem>): AccessRecord {
+  const name = event.personName?.trim() || '未知人员'
+  const gateLabel =
+    event.direction && event.direction !== '未知'
+      ? `${event.direction} / 门${event.doorNo || 1}`
+      : `门${event.doorNo || 1}`
+
+  return normalizeRecord({
+    id: event.employeeNo?.trim() || event.cardNo?.trim() || '未知工号',
+    name,
+    department: event.deviceName?.trim() || event.deviceIP?.trim() || '未知设备',
+    role: event.minorType?.trim() || event.majorType?.trim() || '历史事件',
+    enterTime: event.time?.trim() || '--',
+    gate: gateLabel,
+    direction: event.direction,
+    card: event.cardNo?.trim() || event.minorType?.trim() || '--',
+    status: event.majorType?.trim() || '历史记录',
+    imageUrl: event.imageUrl?.trim(),
+  })
+}
+
+async function loadHistoryDevices() {
+  const response = await fetch(buildApiUrl('/api/devices'), {
+    headers: { Accept: 'application/json' },
+  })
+  if (!response.ok) {
+    throw new Error(`设备列表接口返回 ${response.status}`)
+  }
+
+  const payload = (await response.json()) as DeviceOption[]
+  historyDevices.value = Array.isArray(payload) ? payload : []
+  if (!historyDeviceIP.value && historyDevices.value.length) {
+    historyDeviceIP.value = historyDevices.value[0].ip
+  }
+}
+
+async function openHistoryPanel() {
+  historyVisible.value = true
+  historyError.value = ''
+  initHistoryTimeRange()
+
+  try {
+    await loadHistoryDevices()
+  } catch (error) {
+    historyError.value = error instanceof Error ? error.message : '加载设备列表失败'
+  }
+}
+
+function closeHistoryPanel() {
+  historyVisible.value = false
+  historyLoading.value = false
+  historyError.value = ''
+}
+
+async function fetchHistoryPage(page: number) {
+  const startTime = buildHistoryDateTime(historyStartDate.value, historyStartClock.value)
+  const endTime = buildHistoryDateTime(historyEndDate.value, historyEndClock.value)
+  if (!startTime || !endTime) {
+    throw new Error('请在日历中选择开始和结束时间')
+  }
+
+  const response = await fetch(buildApiUrl('/api/acs-events/history'), {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      deviceIP: historyDeviceIP.value,
+      startTime,
+      endTime,
+      major: 5,
+      minor: 0,
+      maxResults: HISTORY_PAGE_SIZE,
+      searchResultPosition: (page - 1) * HISTORY_PAGE_SIZE,
+      fetchAll: false,
+    }),
+  })
+
+  const payload = (await response.json()) as HistoryEventsResponse
+  if (!response.ok) {
+    throw new Error(payload.message || `历史事件接口返回 ${response.status}`)
+  }
+
+  historyEvents.value = sortRecordsNewestFirst((payload.events ?? []).map(normalizeHistoryEvent))
+  historyTotalMatches.value = Number(payload.totalMatches) || historyEvents.value.length
+  historyPage.value = page
+
+  if (historyListRef.value) {
+    historyListRef.value.scrollTop = 0
+  }
+}
+
+async function searchHistoryEvents() {
+  if (!historyDeviceIP.value) {
+    historyError.value = '请选择门禁设备'
+    return
+  }
+
+  historyLoading.value = true
+  historyError.value = ''
+  historyEvents.value = []
+  historyTotalMatches.value = 0
+  historyPage.value = 1
+
+  try {
+    await fetchHistoryPage(1)
+  } catch (error) {
+    historyEvents.value = []
+    historyTotalMatches.value = 0
+    historyPage.value = 1
+    historyError.value = error instanceof Error ? error.message : '查询历史事件失败'
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function goToHistoryPage(page: number) {
+  if (historyLoading.value || page < 1 || page > historyTotalPages.value || page === historyPage.value) {
+    return
+  }
+
+  historyLoading.value = true
+  historyError.value = ''
+
+  try {
+    await fetchHistoryPage(page)
+  } catch (error) {
+    historyError.value = error instanceof Error ? error.message : '切换分页失败'
+  } finally {
+    historyLoading.value = false
+  }
+}
+
 function normalizeRecord(record: Partial<AccessRecord>): AccessRecord {
   const name = record.name?.trim() || '未知员工'
   const avatarText = record.avatarText?.trim() || name.replace(/[()（）\s]/g, '').slice(0, 2) || '未知'
@@ -414,7 +668,7 @@ function normalizeRecord(record: Partial<AccessRecord>): AccessRecord {
     status: record.status?.trim() || '识别通过',
     direction: normalizeDirection(record.direction),
     stayDuration: record.stayDuration?.trim(),
-    imageUrl: record.imageUrl?.trim(),
+    imageUrl: resolveImageUrl(record.imageUrl),
   }
 }
 
@@ -1425,10 +1679,19 @@ onBeforeUnmount(() => {
   }
 })
 
+const historyTotalPages = computed(() => {
+  const total = historyTotalMatches.value
+  if (total <= 0) {
+    return 1
+  }
+  return Math.ceil(total / HISTORY_PAGE_SIZE)
+})
+
 const selectedRecord = computed(
   () =>
     enterRecords.value.find((record) => record.id === selectedRecordId.value) ??
     stayPeople.value.find((record) => record.id === selectedRecordId.value) ??
+    historyEvents.value.find((record) => record.id === selectedRecordId.value) ??
     {
       ...emptyRecord,
       status: loadError.value || emptyRecord.status,
@@ -1667,6 +1930,7 @@ const audioButtonLabel = computed(() => {
   <main class="screen" :class="{ 'screen--area-alert-active': areaAlertActive }">
     <div v-if="areaAlertActive" class="alert-overlay"></div>
     <div v-if="activeAbnormalMessages.length" class="abnormal-overlay"></div>
+    <div v-if="historyVisible" class="history-overlay" @click="closeHistoryPanel"></div>
     <header class="topbar panel">
       <div>
         <p class="topbar__tag">PERSONNEL ACCESS CONTROL PLATFORM</p>
@@ -1698,6 +1962,127 @@ const audioButtonLabel = computed(() => {
       <div class="alarm-banner__label">活动报警</div>
       <strong>{{ visibleAlarms[0].title }}</strong>
       <p>{{ activeAlarmSummary }}</p>
+    </section>
+
+    <section v-if="historyVisible" class="history-window panel" @click.stop>
+      <div class="history-window__head">
+        <div>
+          <p class="eyebrow">EVENT HISTORY</p>
+          <h2>历史门禁事件</h2>
+        </div>
+        <button class="history-window__close" type="button" @click="closeHistoryPanel">关闭</button>
+      </div>
+
+      <div class="history-window__filters">
+        <label class="history-window__field">
+          <span>门禁设备</span>
+          <select v-model="historyDeviceIP" class="history-window__input">
+            <option v-if="!historyDevices.length" value="">暂无可用设备</option>
+            <option v-for="device in historyDevices" :key="device.ip" :value="device.ip">
+              {{ device.deviceName || device.name || device.ip }}（{{ device.ip }}）
+            </option>
+          </select>
+        </label>
+        <label class="history-window__field history-window__field--range">
+          <span>开始时间</span>
+          <div class="history-window__datetime">
+            <input v-model="historyStartDate" class="history-window__input" type="date" />
+            <input v-model="historyStartClock" class="history-window__input" type="time" step="60" />
+          </div>
+        </label>
+        <label class="history-window__field history-window__field--range">
+          <span>结束时间</span>
+          <div class="history-window__datetime">
+            <input v-model="historyEndDate" class="history-window__input" type="date" />
+            <input v-model="historyEndClock" class="history-window__input" type="time" step="60" />
+          </div>
+        </label>
+        <button
+          class="history-window__search"
+          type="button"
+          :disabled="historyLoading || !historyDevices.length"
+          @click="searchHistoryEvents"
+        >
+          {{ historyLoading ? '查询中...' : '查询历史' }}
+        </button>
+      </div>
+
+      <div class="history-window__presets">
+        <span class="history-window__presets-label">快捷范围</span>
+        <button class="history-window__preset" type="button" @click="applyHistoryPreset('today')">今天</button>
+        <button class="history-window__preset" type="button" @click="applyHistoryPreset('yesterday')">昨天</button>
+        <button class="history-window__preset" type="button" @click="applyHistoryPreset('last7')">近7天</button>
+        <button class="history-window__preset" type="button" @click="applyHistoryPreset('last30')">近30天</button>
+      </div>
+
+      <div class="history-window__meta">
+        <span class="hint-chip">共 {{ historyTotalMatches }} 条，每页 {{ HISTORY_PAGE_SIZE }} 条</span>
+        <span v-if="historyError" class="history-window__error">{{ historyError }}</span>
+      </div>
+
+      <div ref="historyListRef" class="history-window__list records-list">
+        <button
+          v-for="record in historyEvents"
+          :key="`${record.id}-${record.enterTime}-${record.gate}`"
+          class="record-row"
+          :class="{ 'record-row--active': selectedRecordId === record.id }"
+          type="button"
+          @click="selectedRecordId = record.id"
+        >
+          <div class="record-row__avatar">
+            <img
+              v-if="record.imageUrl"
+              class="record-row__avatar-image"
+              :src="resolveImageUrl(record.imageUrl)"
+              :alt="record.name"
+              loading="lazy"
+              decoding="async"
+            />
+            <span v-else>{{ record.avatarText }}</span>
+          </div>
+          <div class="record-row__main">
+            <strong>{{ record.name }}</strong>
+            <span>{{ record.role }}</span>
+          </div>
+          <div class="record-row__time">
+            <span>{{ record.enterTime }}</span>
+            <div class="record-row__tags">
+              <em
+                class="record-direction-badge"
+                :class="{
+                  'record-direction-badge--in': record.direction === '进',
+                  'record-direction-badge--out': record.direction === '出',
+                }"
+              >
+                {{ record.direction }}
+              </em>
+              <em class="history-type-badge">{{ record.status }}</em>
+            </div>
+          </div>
+        </button>
+        <div v-if="historyLoading" class="empty-state">正在查询历史事件...</div>
+        <div v-else-if="!historyEvents.length" class="empty-state">选择时间范围后点击查询历史</div>
+      </div>
+
+      <div v-if="historyTotalMatches > 0" class="history-window__pagination">
+        <button
+          class="history-window__page-btn"
+          type="button"
+          :disabled="historyLoading || historyPage <= 1"
+          @click="goToHistoryPage(historyPage - 1)"
+        >
+          上一页
+        </button>
+        <span class="history-window__page-info">第 {{ historyPage }} / {{ historyTotalPages }} 页</span>
+        <button
+          class="history-window__page-btn"
+          type="button"
+          :disabled="historyLoading || historyPage >= historyTotalPages"
+          @click="goToHistoryPage(historyPage + 1)"
+        >
+          下一页
+        </button>
+      </div>
     </section>
 
     <section v-if="activeAbnormalMessages.length" class="abnormal-window panel">
@@ -1857,7 +2242,7 @@ const audioButtonLabel = computed(() => {
               <img
                 v-if="selectedRecord.imageUrl"
                 class="person-avatar__image"
-                :src="selectedRecord.imageUrl"
+                :src="resolveImageUrl(selectedRecord.imageUrl)"
                 :alt="selectedRecord.name"
               />
               <div v-else class="person-avatar__body">{{ selectedRecord.avatarText }}</div>
@@ -1890,7 +2275,10 @@ const audioButtonLabel = computed(() => {
               <p class="eyebrow">RECENT PASSES</p>
               <h2>最近10条通行记录</h2>
             </div>
-            <span class="hint-chip">{{ enterRecords.length }} 条记录</span>
+            <div class="records-panel__actions">
+              <button class="history-open-button" type="button" @click="openHistoryPanel">查看历史</button>
+              <span class="hint-chip">{{ enterRecords.length }} 条记录</span>
+            </div>
           </div>
 
           <div class="records-list">
@@ -1909,7 +2297,7 @@ const audioButtonLabel = computed(() => {
                 <img
                   v-if="record.imageUrl"
                   class="record-row__avatar-image"
-                  :src="record.imageUrl"
+                  :src="resolveImageUrl(record.imageUrl)"
                   :alt="record.name"
                 />
                 <span v-else>{{ record.avatarText }}</span>
@@ -2031,6 +2419,189 @@ const audioButtonLabel = computed(() => {
     radial-gradient(circle at center, rgba(255, 82, 82, 0.18), rgba(0, 0, 0, 0.62) 64%),
     rgba(4, 10, 18, 0.42);
   backdrop-filter: blur(3px);
+}
+
+.history-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 4;
+  background:
+    radial-gradient(circle at center, rgba(66, 173, 255, 0.14), rgba(0, 0, 0, 0.68) 64%),
+    rgba(4, 10, 18, 0.48);
+  backdrop-filter: blur(4px);
+}
+
+.history-window {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 6;
+  transform: translate(-50%, -50%);
+  width: min(980px, calc(100vw - 28px));
+  max-height: min(82vh, 860px);
+  display: grid;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
+  gap: 12px;
+  border-color: rgba(92, 201, 255, 0.42);
+}
+
+.history-window__head,
+.history-window__filters,
+.history-window__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-window__head {
+  align-items: start;
+}
+
+.history-window__head h2 {
+  margin: 4px 0 0;
+  font-size: 24px;
+}
+
+.history-window__close,
+.history-open-button,
+.history-window__search {
+  height: 38px;
+  padding: 0 16px;
+  border: 1px solid rgba(92, 201, 255, 0.22);
+  border-radius: 12px;
+  cursor: pointer;
+  color: #ecfbff;
+  background: linear-gradient(180deg, rgba(29, 141, 255, 0.28), rgba(13, 63, 130, 0.38));
+}
+
+.history-window__close:disabled,
+.history-window__search:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.history-window__filters {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) repeat(2, minmax(220px, 1.1fr)) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.history-window__field {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: #9edfff;
+}
+
+.history-window__datetime {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(108px, 0.85fr);
+  gap: 8px;
+}
+
+.history-window__input {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(92, 201, 255, 0.18);
+  outline: none;
+  color: #f3fbff;
+  background: rgba(3, 14, 28, 0.92);
+  color-scheme: dark;
+}
+
+.history-window__input::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 0.85;
+  filter: invert(0.82) sepia(0.2) saturate(4) hue-rotate(160deg);
+}
+
+.history-window__presets {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.history-window__presets-label {
+  font-size: 12px;
+  color: #9edfff;
+  margin-right: 4px;
+}
+
+.history-window__preset {
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid rgba(92, 201, 255, 0.18);
+  border-radius: 999px;
+  cursor: pointer;
+  color: #d8f4ff;
+  background: rgba(66, 173, 255, 0.1);
+}
+
+.history-window__meta {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.history-window__error {
+  color: #ff9f9f;
+  font-size: 13px;
+}
+
+.history-window__list {
+  min-height: 0;
+  overflow: auto;
+}
+
+.history-window__pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.history-window__page-btn {
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid rgba(92, 201, 255, 0.22);
+  border-radius: 12px;
+  cursor: pointer;
+  color: #ecfbff;
+  background: linear-gradient(180deg, rgba(29, 141, 255, 0.28), rgba(13, 63, 130, 0.38));
+}
+
+.history-window__page-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.history-window__page-info {
+  min-width: 120px;
+  text-align: center;
+  font-size: 13px;
+  color: #d8f4ff;
+}
+
+.records-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.history-type-badge {
+  font-style: normal;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: #d8f4ff;
+  background: rgba(66, 173, 255, 0.16);
+  border: 1px solid rgba(92, 201, 255, 0.18);
 }
 
 .panel {

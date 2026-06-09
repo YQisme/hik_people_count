@@ -110,6 +110,8 @@ namespace GetACSEvent
         public string UserName { get; set; }
         public string Password { get; set; }
         public ushort Port { get; set; }
+        public int HttpPort { get; set; }
+        public bool UseHttps { get; set; }
         public bool Enabled { get; set; }
         public string Name { get; set; }
         public string Remark { get; set; }
@@ -314,6 +316,38 @@ namespace GetACSEvent
                 errorMessage = ex.Message;
                 return false;
             }
+        }
+
+        public static DeviceConfigDeviceEntry GetDevice(string deviceIP, string path = null)
+        {
+            return FindDevice(deviceIP, path);
+        }
+
+        public static List<DeviceConfigDeviceEntry> GetEnabledDevices(string path = null)
+        {
+            var document = Load(path);
+            var result = new List<DeviceConfigDeviceEntry>();
+            if (document?.Devices == null)
+            {
+                return result;
+            }
+
+            foreach (var device in document.Devices)
+            {
+                if (device == null || !device.Enabled)
+                {
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(device.IP))
+                {
+                    continue;
+                }
+
+                result.Add(device);
+            }
+
+            return result;
         }
 
         public static string GetDeviceField(string deviceIP, string fieldName, string path = null)
