@@ -22,5 +22,5 @@ if errorlevel 1 (
     echo.
 )
 
-dotnet run --project "%~dp0ACSEventConsole.csproj"
+dotnet run --project "%~dp0..\src\ACSEventConsole\ACSEventConsole.csproj"
 exit /b %ERRORLEVEL%

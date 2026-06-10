@@ -13,17 +13,17 @@
 ## 项目结构
 
 ```
-├── backend/                 # 后端（C# / .NET）
+├── backend/                 # 后端（ASP.NET Core 8）
 │   ├── config/              # 本地配置（*.json 不纳入 Git，见 *.example 模板）
 │   ├── scripts/             # 运维脚本（如从设备同步员工配置）
 │   ├── ACSEventConsole.sln  # 解决方案入口
-│   └── GetACSEvent/
-│       ├── ACSEventConsole.csproj   # 控制台服务（推荐）
-│       ├── AcsEventProcessingQueue.cs # SDK 回调异步队列
-│       ├── MqttConnectionPool.cs    # MQTT 长连接池
-│       ├── GetACSEvent.csproj       # 带界面的 SDK 示例程序
-│       ├── 启动服务.bat             # 先同步员工再启动后端
-│       └── bin/Debug/net8.0/            # dotnet 编译输出目录
+│   └── src/
+│       └── ACSEventConsole/ # Web API 主项目
+│           ├── Program.cs
+│           ├── Controllers/
+│           ├── Services/
+│           ├── Infrastructure/
+│           └── 启动服务.bat
 └── frontend/                # 前端看板（Vue 3 + Vite + TypeScript）
     ├── src/
     └── dist/                # 生产构建产物
@@ -64,15 +64,15 @@ python sync_employee_config.py
 也可使用一键启动（先同步员工，再启动后端）：
 
 ```bash
-cd backend/GetACSEvent
+cd backend/src/ACSEventConsole
 启动服务.bat
 ```
 
 ### 2. 启动后端
 
 ```bash
-cd backend/GetACSEvent
-dotnet run --project ACSEventConsole.csproj
+cd backend/src/ACSEventConsole
+dotnet run
 ```
 
 启动成功后，后端默认监听 **8081** 端口。可通过浏览器访问健康检查接口验证：
@@ -111,7 +111,7 @@ yarn preview
 ## 运行顺序
 
 1. （推荐）运行 `backend/scripts/sync_employee_config.py` 从设备同步员工
-2. 启动后端 `dotnet run --project ACSEventConsole.csproj`（或使用 `backend/GetACSEvent/启动服务.bat` 自动完成第 1、2 步）
+2. 启动后端 `dotnet run`（或使用 `backend/src/ACSEventConsole/启动服务.bat` 自动完成第 1、2 步）
 3. 启动前端 `yarn dev`
 4. 打开浏览器访问 http://localhost:5173
 
@@ -298,7 +298,7 @@ python sync_employee_config.py --device-config ../config/DeviceConfig.json
 python sync_employee_config.py --https
 ```
 
-Windows 也可双击 `backend/scripts/同步员工配置.bat`，或使用 `backend/GetACSEvent/启动服务.bat` 在启动后端前自动同步。
+Windows 也可双击 `backend/scripts/同步员工配置.bat`，或使用 `backend/src/ACSEventConsole/启动服务.bat` 在启动后端前自动同步。
 
 #### 端口说明
 
@@ -405,7 +405,7 @@ VITE_API_BASE_URL=http://192.168.0.29:8081
 若无需修改后端代码，可跳过 `dotnet run`，直接运行已有产物：
 
 ```bash
-cd backend/GetACSEvent/bin/Debug/net8.0
+cd backend/src/ACSEventConsole/bin/Debug/net8.0
 ./ACSEventConsole.exe
 ```
 
