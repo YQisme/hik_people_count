@@ -18,7 +18,14 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.2.1" />
   </ItemGroup>
 
-  <Target Name="CopyHikvisionRuntime" AfterTargets="Build">
-    <Copy SourceFiles="@(HikvisionRuntimeFiles)" DestinationFiles="@(HikvisionRuntimeFiles->'$(OutDir)%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" OverwriteReadOnlyFiles="true" />
+  <Target Name="CopyHikvisionRuntime" AfterTargets="Build;Publish">
+    <PropertyGroup>
+      <_HikvisionRuntimeDestination Condition="'$(PublishDir)' != ''">$(PublishDir)</_HikvisionRuntimeDestination>
+      <_HikvisionRuntimeDestination Condition="'$(_HikvisionRuntimeDestination)' == ''">$(OutDir)</_HikvisionRuntimeDestination>
+    </PropertyGroup>
+    <Copy SourceFiles="@(HikvisionRuntimeFiles)"
+          DestinationFiles="@(HikvisionRuntimeFiles->'$(_HikvisionRuntimeDestination)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true"
+          OverwriteReadOnlyFiles="true" />
   </Target>
 </Project>

@@ -1,70 +1,47 @@
 @echo off
+chcp 65001 >nul
 setlocal EnableExtensions
 
-cd /d "%~dp0.."
-set "ROOT=%CD%"
-set "OUT=%ROOT%\deploy\output"
-set "BACKEND_OUT=%OUT%\backend\service"
-set "CONFIG_OUT=%OUT%\backend\config"
-set "FRONTEND_OUT=%OUT%\frontend"
+cd /d "%~dp0"
+set "OUT=%~dp0output"
 
 echo ========================================
-echo PersonCount - Production Build
+echo 人员计数 - 全量打包（前端 + 后端）
 echo ========================================
 echo.
 
 if exist "%OUT%" rmdir /s /q "%OUT%"
-mkdir "%BACKEND_OUT%" 2>nul
-mkdir "%CONFIG_OUT%" 2>nul
-mkdir "%FRONTEND_OUT%" 2>nul
 
-echo [1/3] Publish backend...
-dotnet publish "%ROOT%\backend\src\ACSEventConsole\ACSEventConsole.csproj" -c Release -r win-x64 --self-contained false -o "%BACKEND_OUT%"
+call "%~dp0publish-backend.bat"
 if errorlevel 1 (
-  echo Backend publish failed.
+  echo.
+  echo [失败] 全量打包中止：后端打包失败
   exit /b 1
 )
 
 echo.
-echo [2/3] Build frontend...
-pushd "%ROOT%\frontend"
-where yarn >nul 2>&1
+
+call "%~dp0publish-frontend.bat"
 if errorlevel 1 (
-  call npm install
-  call npm run build
-) else (
-  call yarn install
-  call yarn build
-)
-if errorlevel 1 (
-  popd
-  echo Frontend build failed.
+  echo.
+  echo [失败] 全量打包中止：前端打包失败
   exit /b 1
-)
-popd
-
-echo.
-echo [3/3] Copy deploy files...
-xcopy /Y /E /I "%ROOT%\frontend\dist\*" "%FRONTEND_OUT%\"
-copy /Y "%ROOT%\deploy\iis\web.config" "%FRONTEND_OUT%\web.config"
-
-if not exist "%CONFIG_OUT%\DeviceConfig.json" (
-  if exist "%ROOT%\backend\config\DeviceConfig.json.example" (
-    copy /Y "%ROOT%\backend\config\DeviceConfig.json.example" "%CONFIG_OUT%\DeviceConfig.json"
-  )
-)
-if not exist "%CONFIG_OUT%\EmployeeConfig.json" (
-  if exist "%ROOT%\backend\config\EmployeeConfig.json.example" (
-    copy /Y "%ROOT%\backend\config\EmployeeConfig.json.example" "%CONFIG_OUT%\EmployeeConfig.json"
-  )
 )
 
 echo.
 echo ========================================
-echo Done: %OUT%
-echo   backend\service\  - backend exe
-echo   backend\config\   - config files
-echo   frontend\         - IIS site root
-echo See deploy\iis\README.md
+echo 全量打包完成: %OUT%
+echo.
+echo 部署目录结构:
+echo   output/backend/service/  - 运行 ACSEventConsole.exe
+echo   output/backend/config/   - 编辑设备与员工配置
+echo   output/backend/scripts/  - 员工同步脚本
+echo   output/frontend/         - IIS 网站根目录
+echo.
+echo 建议步骤:
+echo   1. 将 output/backend 整目录放到服务器（保持 backend/config 层级）
+echo   2. 注册 Windows 服务或计划任务运行 service/ACSEventConsole.exe
+echo   3. IIS 建站指向 output/frontend
+echo   4. 访问 http://服务器IP/health 与看板页面验证
 echo ========================================
 exit /b 0

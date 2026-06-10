@@ -31,6 +31,7 @@ project.lock.json
 project.fragment.lock.json
 artifacts/
 publish/
+deploy/output/
 *.nupkg
 *.snupkg
 

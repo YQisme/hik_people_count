@@ -24,6 +24,12 @@
 │           ├── Services/
 │           ├── Infrastructure/
 │           └── 启动服务.bat
+├── deploy/                  # 生产打包脚本与 IIS 配置
+│   ├── publish.bat          # 全量打包（前端 + 后端）
+│   ├── publish-backend.bat  # 仅打包后端
+│   ├── publish-frontend.bat # 仅打包前端
+│   ├── iis/web.config       # IIS SPA 路由配置
+│   └── output/              # 打包输出（不纳入 Git）
 └── frontend/                # 前端看板（Vue 3 + Vite + TypeScript）
     ├── src/
     └── dist/                # 生产构建产物
@@ -95,18 +101,149 @@ yarn dev
 
 Vite 开发服务器会将 `/api`、`/events`、`/images`、`/config`、`/health` 等请求代理到 `http://localhost:8081`（含 SSE 接口 `/api/dashboard/stream`），`.env.local` 中 `VITE_API_BASE_URL` 留空即可。
 
-### 4. 生产部署（可选）
+## 生产部署（Windows Server + IIS）
 
-```bash
-# 构建前端静态资源
-cd frontend
-yarn build
+推荐架构：**IIS 托管前端静态页，后端独立进程运行**。后端需 7×24 连接海康 SDK 接收刷脸回调，不适合放入 IIS 应用池（应用池回收会断开 SDK 布防通道）。
 
-# 预览构建结果
-yarn preview
+```
+浏览器
+  ├─ http://服务器:80/           → IIS（前端静态资源）
+  └─ http://服务器:8081/api/...  → ACSEventConsole.exe（Windows 服务）
+                                       ↓ SDK
+                                  门禁设备 :8000
 ```
 
-后端保持运行 `ACSEventConsole.exe`；前端可将 `frontend/dist/` 部署到任意静态文件服务器，并通过环境变量指定 API 地址（见下文）。
+### 服务器环境
+
+| 组件 | 说明 |
+| ---- | ---- |
+| Windows Server x64 | 部署目标 |
+| [.NET 8 Runtime x64](https://dotnet.microsoft.com/download/dotnet/8.0) | 运行后端 exe |
+| [Visual C++ 2015–2022 可再发行组件 x64](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist) | 海康 SDK 依赖 |
+| IIS + [URL Rewrite](https://www.iis.net/downloads/microsoft/url-rewrite) | 托管前端（**必须安装** URL Rewrite） |
+| Node.js + Yarn | 仅在**构建机**打包前端时需要 |
+
+### 打包
+
+在开发机项目根目录执行（或双击 bat 文件）：
+
+```bat
+deploy\publish.bat            :: 全量打包（推荐）
+deploy\publish-backend.bat    :: 仅后端
+deploy\publish-frontend.bat   :: 仅前端
+```
+
+输出目录 `deploy/output/`：
+
+```
+deploy/output/
+├── backend/
+│   ├── service/     ← ACSEventConsole.exe + HCNetSDK.dll 等 SDK 依赖
+│   ├── config/      ← DeviceConfig.json / EmployeeConfig.json
+│   └── scripts/     ← 员工同步等运维脚本
+└── frontend/        ← Vue 静态资源 + web.config（IIS 网站根目录）
+```
+
+打包脚本会自动：
+
+- `dotnet publish` 发布后端（Release / win-x64）
+- 复制 `Runtime/x64/` 下全部海康 SDK DLL 到 `service/`（与 exe 同目录）
+- 复制配置模板；若本地已有 `backend/config/*.json` 会一并带入
+- 构建前端并附带 `deploy/iis/web.config`
+
+生产环境 API 地址：打包前可在 `frontend/.env.production` 中设置：
+
+```env
+VITE_API_BASE_URL=http://192.168.0.7:8081
+```
+
+留空则前端默认访问 **同主机名的 8081 端口**。
+
+### 拷贝到服务器
+
+建议目录（示例 `D:\person-count\`）：
+
+```
+D:\person-count\
+├── backend\
+│   ├── service\          ← publish 输出的 exe 和 DLL
+│   ├── config\           ← 编辑 DeviceConfig.json
+│   └── scripts\
+└── frontend\             ← IIS 网站根目录
+```
+
+> **必须保留 `backend\config` 目录层级**，后端启动时会向上查找名为 `backend` 的目录来定位配置。
+
+### 启动后端
+
+1. 编辑 `backend\config\DeviceConfig.json`（设备 IP、账号、`webPort` 等）
+2. （推荐）运行 `backend\scripts\同步员工配置.bat` 生成员工表
+3. 启动服务：
+
+```bat
+cd /d D:\person-count\backend\service
+ACSEventConsole.exe
+```
+
+生产环境建议注册为 **Windows 服务**（如 [NSSM](https://nssm.cc/)）或「任务计划程序 → 系统启动时运行」，避免登录注销后进程退出。
+
+验证后端：
+
+```
+http://localhost:8081/health
+http://localhost:8081/swagger
+```
+
+### IIS 配置前端
+
+1. 安装 **URL Rewrite** 模块，执行 `iisreset` 重启 IIS
+2. **应用程序池** → 添加 → 名称 `ACSDashboard`，**.NET CLR 版本 = 无托管代码**
+3. **网站** → 添加 → 物理路径指向 `D:\person-count\frontend`，端口 **80**（或自定义如 3000）
+4. 确认 `frontend\web.config` 存在（打包时已自动复制）
+5. 给 `IIS_IUSRS` 和 `IIS AppPool\ACSDashboard` 授予 frontend 目录**读取**权限
+6. 防火墙放行 **80**（前端）及 **8081**（后端 API，浏览器需能访问）
+
+访问 `http://服务器IP/` 查看看板；F12 → Network 中应看到对 `:8081/api/dashboard/stream` 的 SSE 长连接。
+
+### 部署验证清单
+
+| 检查项 | 方法 |
+| ------ | ---- |
+| 后端健康 | `http://localhost:8081/health` |
+| SDK 加载 | `service\` 下存在 `HCNetSDK.dll` 和 `HCNetSDKCom\` 目录 |
+| SSE 推送 | 浏览器访问 `/api/dashboard/stream`，刷脸后看板即时更新 |
+| 前端页面 | `http://服务器IP/` 正常显示，无 500 错误 |
+| 员工姓名 | 已同步 `EmployeeConfig.json` 且重启过后端 |
+
+### 部署常见问题
+
+**后端启动报 `Unable to load DLL '.\HCNetSDK.dll'`**
+
+- `service\` 目录缺少海康 SDK 文件。确认存在 `HCNetSDK.dll`、`HCCore.dll`、`HCNetSDKCom\` 等
+- 重新运行 `deploy\publish-backend.bat` 打包，或手动将 `backend\src\ACSEventConsole\Runtime\x64\*` 复制到 `service\`
+- 若 DLL 齐全仍报错，安装 **Visual C++ 2015–2022 x64 可再发行组件**
+
+**IIS 报 HTTP 500.52，无法识别 `logicalAnd`**
+
+- 服务器 URL Rewrite 版本较旧（2.0）。项目 `web.config` 已兼容，确认 `<conditions>` 标签**不含** `logicalAnd` 属性
+- 重新打包前端或手动更新服务器上 `frontend\web.config`
+
+**IIS 报 500.19（rewrite 相关）**
+
+- 未安装 URL Rewrite 模块
+
+**看板无数据**
+
+- 后端未启动，或浏览器无法访问 **8081** 端口（防火墙拦截）
+- 检查 `DeviceConfig.json` 设备配置与网络连通性
+
+**更新部署**
+
+| 更新内容 | 操作 |
+| -------- | ---- |
+| 前端 | `publish-frontend.bat` → 覆盖 `frontend\` |
+| 后端 | `publish-backend.bat` → 覆盖 `service\` → **重启后端进程** |
+| 配置 | 编辑 `backend\config\*.json` → **重启后端** |
 
 ## 运行顺序
 
@@ -396,17 +533,9 @@ cp .env.example .env.local
 `.env.local` 示例：
 
 ```env
-# 留空则开发模式走 Vite 代理；生产环境可填写完整后端地址
-VITE_API_BASE_URL=http://192.168.0.29:8081
-```
-
-## 直接运行已编译版本（可选）
-
-若无需修改后端代码，可跳过 `dotnet run`，直接运行已有产物：
-
-```bash
-cd backend/src/ACSEventConsole/bin/Debug/net8.0
-./ACSEventConsole.exe
+# 留空：开发模式走 Vite 代理；生产默认同主机名 :8081
+# 填写完整地址：VITE_API_BASE_URL=http://192.168.0.29:8081
+VITE_API_BASE_URL=
 ```
 
 ## 实时数据架构
@@ -492,6 +621,16 @@ http://localhost:8081/api/dashboard/stream
 - 确认后端 `ACSEventConsole.exe` 已启动且 `/health` 可访问
 - 确认 `DeviceConfig.json` 中门禁设备 IP、账号配置正确，设备网络可达
 - 开发模式下确认前端运行在 5173 端口（Vite 代理依赖此端口）
+- **生产部署**：确认浏览器能访问后端 **8081** 端口（IIS 只托管前端，API 仍走 8081）
+
+**后端启动失败 / HCNetSDK.dll 找不到**
+
+- 见上文「生产部署 → 部署常见问题」
+
+**IIS 前端 500 错误**
+
+- 500.52：URL Rewrite 版本过旧，更新 `web.config` 或升级 URL Rewrite 模块
+- 500.19：未安装 URL Rewrite 模块
 
 **端口冲突**
 
@@ -523,6 +662,8 @@ http://localhost:8081/api/dashboard/stream
 ## 相关文档
 
 - `backend/README.md` — 后端独立项目说明
+- `deploy/publish.bat` — 生产打包入口脚本
+- `deploy/iis/web.config` — IIS 前端 SPA 路由配置
 - `backend/scripts/sync_employee_config.py` — 从设备同步员工配置脚本
 - `backend/GetACSEvent/事件API说明.md` — 事件 API 详细文档
 - `backend/GetACSEvent/图片服务器使用说明.md` — 图片服务说明
